@@ -1,0 +1,26 @@
+import * as draw from "./draw";
+
+// @ts-ignore
+import renderWorkerUrl from "./renderWorker.wts";
+
+const renderWorker = new Worker(renderWorkerUrl, { type: "module" });
+
+draw.setRenderWorker(renderWorker);
+
+renderWorker.addEventListener("message", ({ data }) => {
+    switch (data.type) {
+        case constants.MESSAGE_BUFFER_RENDER_TO_TRANSPORT: {
+            transportWorker.postMessage(data, { transfer: [data.buffer] });
+            break;
+        }
+        case constants.MESSAGE_BUFFER_RENDER_TO_DRAW: {
+            draw.handleBuffer(data.buffer, data.currentT, data.glCurrentT);
+            break;
+        }
+        default: {
+            console.error(
+                `unexpected message from render ${JSON.stringify(data)}`,
+            );
+        }
+    }
+});

@@ -1,0 +1,26 @@
+[package]
+authors = [
+  "International Centre for Neuromorphic Systems",
+  "Alexandre Marcireau",
+]
+edition = "2021"
+license = "MIT"
+name = "extension"
+readme = "README.md"
+resolver = "2"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2.100"
+web-sys = {version = "0.3.77", features = [
+  "console",
+]}
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

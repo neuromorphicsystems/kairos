@@ -1,0 +1,248 @@
+    // @TEMP {
+    let mut buffer = vec![0; 65536];
+    println!("Waiting for data from client...");
+    loop {
+        println!("poll transport connection");
+        tokio::select! {
+            stream = connection.accept_bi() => {
+                let mut stream = stream?;
+                println!("Accepted BI stream");
+
+                let bytes_read = match stream.1.read(&mut buffer).await? {
+                    Some(bytes_read) => bytes_read,
+                    None => continue,
+                };
+
+                let str_data = std::str::from_utf8(&buffer[..bytes_read])?;
+
+                println!("Received (bi) '{str_data}' from client");
+
+                stream.0.write_all(b"ACK").await?;
+            }
+            stream = connection.accept_uni() => {
+                let mut stream = stream?;
+                println!("Accepted UNI stream");
+
+                let bytes_read = match stream.read(&mut buffer).await? {
+                    Some(bytes_read) => bytes_read,
+                    None => continue,
+                };
+
+                let str_data = std::str::from_utf8(&buffer[..bytes_read])?;
+
+                println!("Received (uni) '{str_data}' from client");
+
+                let mut stream = connection.open_uni().await?.await?;
+                stream.write_all(b"ACK").await?;
+            }
+            dgram = connection.receive_datagram() => {
+                let dgram = dgram?;
+                let str_data = std::str::from_utf8(&dgram)?;
+
+                println!("Received (dgram) '{str_data}' from client");
+
+                connection.send_datagram(b"ACK")?;
+            }
+        }
+    }
+    // }
+
+    /*
+    let mut buffer = vec![0; 65536];
+
+    // @DEV load event data
+    println!("load buffers from test.raw");
+    let mut buffers = Vec::new(); // @DEV this will become a circular buffer
+    {
+        use std::io::Read;
+        let mut file_buffer = vec![0u8; 1 << 17];
+        let mut file = std::fs::File::open("test.raw")?;
+        let mut adapter = evt3::Adapter::from_dimensions(1280, 720);
+        let mut next_t: u64 = 0;
+        let mut frame_count = 0_usize;
+        let mut buffer = Vec::new();
+        let client_maximum_buffer_size = context.lock().await.client_maximum_buffer_size;
+        {
+            let state = adapter.state();
+            buffer.extend_from_slice(&(0_u32).to_le_bytes());
+            buffer.extend_from_slice(&state.t.to_le_bytes());
+            buffer.extend_from_slice(&state.overflows.to_le_bytes());
+            buffer.extend_from_slice(&state.previous_msb_t.to_le_bytes());
+            buffer.extend_from_slice(&state.previous_lsb_t.to_le_bytes());
+            buffer.extend_from_slice(&state.x.to_le_bytes());
+            buffer.extend_from_slice(&state.y.to_le_bytes());
+            buffer.push(state.polarity as u8);
+            buffer.push(0u8);
+            buffer.extend_from_slice(&next_t.to_le_bytes());
+        }
+        loop {
+            let length = file.read(&mut file_buffer)?;
+            if length == 0 {
+                break;
+            }
+            let state = adapter.state().to_owned();
+            buffer.extend_from_slice(&file_buffer[0..length]);
+            adapter.convert(&file_buffer[0..length], |_| {}, |_| {});
+            if adapter.current_t() >= next_t as u64 {
+                let mut data_buffer = Vec::new();
+                std::mem::swap(&mut data_buffer, &mut buffer);
+                if data_buffer.len() > client_maximum_buffer_size {
+                    data_buffer.resize(client_maximum_buffer_size, 0u8); // the data source should stop adding rather than triming after growing
+                    data_buffer.shrink_to_fit();
+                }
+                let length = data_buffer.len();
+                data_buffer[0..4].copy_from_slice(&(length as u32).to_le_bytes());
+                buffers.push(data_buffer);
+                buffer.extend_from_slice(&(0_u32).to_le_bytes());
+                buffer.extend_from_slice(&state.t.to_le_bytes());
+                buffer.extend_from_slice(&state.overflows.to_le_bytes());
+                buffer.extend_from_slice(&state.previous_msb_t.to_le_bytes());
+                buffer.extend_from_slice(&state.previous_lsb_t.to_le_bytes());
+                buffer.extend_from_slice(&state.x.to_le_bytes());
+                buffer.extend_from_slice(&state.y.to_le_bytes());
+                buffer.push(state.polarity as u8);
+                buffer.push(0u8);
+                buffer.extend_from_slice(&next_t.to_le_bytes());
+            }
+            while adapter.current_t() >= next_t as u64 {
+                frame_count += 1;
+                next_t = (frame_count as f64 * 1e6 / 60.0).round() as u64;
+            }
+        }
+    }
+    {
+        let mut minimum: Option<usize> = None;
+        let mut maximum: Option<usize> = None;
+        let mut sum = 0;
+        for buffer in buffers.iter() {
+            minimum =
+                Some(minimum.map_or_else(|| buffer.len(), |minimum| minimum.min(buffer.len())));
+            maximum =
+                Some(maximum.map_or_else(|| buffer.len(), |maximum| maximum.max(buffer.len())));
+            sum += buffer.len();
+        }
+        println!(
+            "{} buffers, minimum = {:?} B, mean = {} B, maximum = {:?} B",
+            buffers.len(),
+            minimum,
+            sum as f64 / buffers.len() as f64,
+            maximum
+        ); // @DEV
+    }
+    let start = tokio::time::Instant::now();
+    let unidirectional_stream = connection.open_uni().await?;
+    let mut sender = unidirectional_stream.await?;
+    for (index, buffer) in buffers.iter().enumerate() {
+        sender.write_all(buffer.as_slice()).await?;
+        let target_duration =
+            std::time::Duration::from_micros(((index + 1) as f64 * 1e6 / 60.0).round() as u64);
+        println!(
+            "{}, {} ms, sent {} B",
+            index + 1,
+            target_duration.as_millis(),
+            buffer.len()
+        );
+        tokio::time::sleep_until(start + target_duration).await;
+    }
+    Ok(())
+
+    // @DEV @test {
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut buffers = Vec::new();
+    let target_size = 100000000_u64; // 100 MB
+    let buffer_size = 1 << 11;
+    let packet_count = target_size.div_ceil(buffer_size);
+    {
+        use rand::prelude::*;
+        println!(
+            "generate random buffers of {} B ({} buffers)",
+            buffer_size, packet_count,
+        );
+        let mut rng = rand::rng();
+        for index in 0..packet_count {
+            let mut buffer = Vec::new();
+            buffer.extend_from_slice(&(buffer_size as u32).to_be_bytes());
+            buffer.push(if index == packet_count - 1 { 1 } else { 0 });
+            for _ in 0..buffer_size - buffer.len() as u64 {
+                buffer.push(rng.random());
+            }
+            buffers.push(buffer);
+        }
+        println!("generated random buffers");
+    }
+    {
+        let mut sum: u64 = 0;
+        for buffer in buffers.iter() {
+            for byte in buffer {
+                sum += *byte as u64;
+            }
+        }
+        println!("sum={sum}");
+    }
+    {
+        let unidirectional_stream = connection.open_uni().await?;
+        let mut sender = unidirectional_stream.await?;
+        {
+            let now = std::time::Instant::now();
+            for buffer in buffers.iter() {
+                sender.write_all(buffer.as_slice()).await?;
+            }
+            let elapsed = now.elapsed();
+            println!(
+                "duration={} ms, sent {} packets ({} MB, {} MB/s)",
+                elapsed.as_millis(),
+                buffers.len(),
+                (packet_count * buffer_size) as f64 / 1e6,
+                (packet_count * buffer_size) as f64 / 1e6 / elapsed.as_secs_f64()
+            )
+        }
+        sender.finish().await?;
+    }
+    // }
+
+    println!("Waiting for data from client...");
+    loop {
+        println!("poll transport connection"); // @DEV
+        tokio::select! {
+            stream = connection.accept_bi() => {
+                let mut stream = stream?;
+                println!("Accepted BI stream");
+
+                let bytes_read = match stream.1.read(&mut buffer).await? {
+                    Some(bytes_read) => bytes_read,
+                    None => continue,
+                };
+
+                let str_data = std::str::from_utf8(&buffer[..bytes_read])?;
+
+                println!("Received (bi) '{str_data}' from client");
+
+                stream.0.write_all(b"ACK").await?;
+            }
+            stream = connection.accept_uni() => {
+                let mut stream = stream?;
+                println!("Accepted UNI stream");
+
+                let bytes_read = match stream.read(&mut buffer).await? {
+                    Some(bytes_read) => bytes_read,
+                    None => continue,
+                };
+
+                let str_data = std::str::from_utf8(&buffer[..bytes_read])?;
+
+                println!("Received (uni) '{str_data}' from client");
+
+                let mut stream = connection.open_uni().await?.await?;
+                stream.write_all(b"ACK").await?;
+            }
+            dgram = connection.receive_datagram() => {
+                let dgram = dgram?;
+                let str_data = std::str::from_utf8(&dgram)?;
+
+                println!("Received (dgram) '{str_data}' from client");
+
+                connection.send_datagram(b"ACK")?;
+            }
+        }
+    }
+    */

@@ -1,0 +1,14 @@
+{
+    "compilerOptions": {
+        "isolatedModules": true,
+        "verbatimModuleSyntax": true,
+        "lib": ["esnext", "DOM", "DOM.Iterable"],
+        "moduleResolution": "node",
+        "module": "esnext",
+        "noEmit": true,
+        "target": "esnext",
+        "ignoreDeprecations": "5.0"
+    },
+    "files": ["build.js"],
+    "include": ["src/**/*.ts", "src/**/*.svelte"]
+}

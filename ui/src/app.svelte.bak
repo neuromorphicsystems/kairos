@@ -1,0 +1,16 @@
+<script lang="ts">
+    import { onMount } from "svelte";
+    import {} from "./workers";
+    import { attachCanvas, detachCanvas } from "./draw";
+
+    let canvas: HTMLCanvasElement = null;
+
+    onMount(() => {
+        const id = attachCanvas(canvas);
+        return () => detachCanvas(id);
+    });
+</script>
+
+<main>
+    <canvas bind:this={canvas} width="1280" height="720"></canvas>
+</main>
