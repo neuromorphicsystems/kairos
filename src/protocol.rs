@@ -26,7 +26,7 @@ pub struct SharedClientState {
 
 impl SharedClientState {
     pub fn to_bytes(&self) -> Result<Vec<u8>, anyhow::Error> {
-        let mut bytes: Vec<u8> = vec![0; 4];
+        let mut bytes = vec![0u8; 4];
         serde_json::to_writer(&mut bytes, self)?;
         let length = bytes.len();
         bytes[0..4].copy_from_slice(&(length as u32).to_le_bytes());
@@ -67,6 +67,7 @@ pub struct Autotrigger {}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    Ping,
     StartStream {
         id: u32,
     },

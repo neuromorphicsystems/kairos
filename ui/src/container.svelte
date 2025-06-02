@@ -1,85 +1,81 @@
 <script lang="ts">
     import type { ContainerId } from "./constants";
 
-    import { onMount } from "svelte";
-    import { appState, attachCanvas, detachCanvas } from "./protocol.svelte"; // @TEMP
+    import * as utilities from "./utilities";
+    import appState from "./appState.svelte";
+    import EventDisplay from "./eventDisplay.svelte";
+    import SampleDisplay from "./sampleDisplay.svelte";
 
     let {
         id,
         size,
         activeId = $bindable(),
-        displayPaneOpen = $bindable(),
     }: {
         id: ContainerId;
         size: number;
         activeId: ContainerId;
-        displayPaneOpen: boolean;
     } = $props();
 
-    // @TEMP {
-    let canvasState: {
-        canvas: HTMLCanvasElement;
-        deviceId: number;
-        streamIndex: number;
-        canvasId: number;
-    } = $state({
-        canvas: null,
-        deviceId: null,
-        streamIndex: 0,
-        canvasId: null,
-    });
-    //const streamIndex = 0;
-    $effect(() => {
-        if (
-            canvasState.deviceId == null &&
-            appState.shared.devices.length > 0
-        ) {
-            canvasState.deviceId = appState.shared.devices[0].id;
-        }
-    });
-    $effect(() => {
-        if (
-            canvasState.canvasId == null &&
-            canvasState.deviceId != null &&
-            canvasState.canvas != null
-        ) {
-            canvasState.canvasId = attachCanvas(
-                canvasState.deviceId,
-                canvasState.streamIndex,
-                canvasState.canvas,
-            );
-        }
-    });
-    onMount(() => {
-        return () => {
-            if (canvasState.canvasId != null) {
-                detachCanvas(
-                    canvasState.deviceId,
-                    canvasState.streamIndex,
-                    canvasState.canvasId,
-                );
-            }
-        };
-    });
-    // }
+    let width: number = $state(0);
+    let height: number = $state(0);
+    let holdingMouseButton: boolean = $state(false);
+
+    const display = $derived(appState.local.displays[id - 1]);
 </script>
 
-<div
-    class="container {activeId === id ? 'active' : ''}"
-    tabindex={id}
-    role="button"
-    onclick={() => {
-        if (activeId === id) {
-            activeId = 0;
-        } else {
-            activeId = id;
-            displayPaneOpen = true;
-        }
+<svelte:window
+    onmouseup={() => {
+        holdingMouseButton = false;
     }}
-    onkeydown={() => {}}
+/>
+
+<div
+    bind:clientWidth={width}
+    bind:clientHeight={height}
+    class="container {activeId === id ? 'active' : ''}"
     style="flex-grow: {size}"
+    role="button"
+    tabindex={id}
+    onmousedown={() => {
+        holdingMouseButton = true;
+    }}
+    onmouseup={() => {
+        if (holdingMouseButton) {
+            if (activeId === id) {
+                activeId = 0;
+            } else {
+                activeId = id;
+            }
+        }
+        holdingMouseButton = false;
+    }}
 >
-    <canvas bind:this={canvasState.canvas} class="painter"></canvas>
+    {#if display != null && display.target != null}
+        {#if display.properties.type === "EventDisplayProperties"}
+            <EventDisplay
+                deviceId={display.target.deviceId}
+                streamIndex={display.target.streamIndex}
+                parentWidth={width}
+                parentHeight={height}
+                onCancelClick={() => {
+                    holdingMouseButton = false;
+                }}
+                properties={display.properties}
+            ></EventDisplay>
+        {:else if display.properties.type === "SampleDisplayProperties"}
+            <SampleDisplay
+                deviceId={display.target.deviceId}
+                streamIndex={display.target.streamIndex}
+                parentWidth={width}
+                parentHeight={height}
+                orientation={display.properties.orientation}
+                onCancelClick={() => {
+                    holdingMouseButton = false;
+                }}
+                properties={display.properties}
+            ></SampleDisplay>
+        {/if}
+    {/if}
 </div>
 
 <style>
@@ -95,13 +91,5 @@
 
     .container.active {
         border: 1px solid var(--blue-1);
-    }
-
-    .painter {
-        position: absolute;
-        width: 100%;
-        height: 100%;
-        object-position: center center;
-        object-fit: contain;
     }
 </style>

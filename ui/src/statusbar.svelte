@@ -1,25 +1,23 @@
 <script lang="ts">
-    import type { ConnectionStatus, ContainerId, Layout } from "./constants";
-    import LayoutPopover from "./layoutpopover.svelte";
+    import type { ContainerId } from "./constants";
+
+    import appState from "./appState.svelte";
+    import LayoutPopover from "./layoutPopover.svelte";
 
     let {
-        connectionStatus,
         devicePaneOpen = $bindable(),
         displayPaneOpen = $bindable(),
-        layout = $bindable(),
-        activeContainerId = $bindable(),
+        activeDisplayId = $bindable(),
     }: {
-        connectionStatus: ConnectionStatus;
         devicePaneOpen: boolean;
         displayPaneOpen: boolean;
-        layout: Layout;
-        activeContainerId: ContainerId;
+        activeDisplayId: ContainerId;
     } = $props();
 
     let layoutOpen: boolean = $state(false);
 </script>
 
-<div class="statusbar {connectionStatus}">
+<div class="status-bar {appState.local.connectionStatus}">
     <div class="left">
         <button
             class={devicePaneOpen ? "active" : ""}
@@ -47,11 +45,11 @@
         >
             <div class="label">Layout</div>
         </button>
-        <LayoutPopover bind:open={layoutOpen} bind:layout bind:activeContainerId
+        <LayoutPopover bind:open={layoutOpen} bind:activeDisplayId
         ></LayoutPopover>
-        {#if connectionStatus === "connecting"}
+        {#if appState.local.connectionStatus === "connecting"}
             <div class="connection-label">Connecting...</div>
-        {:else if connectionStatus === "disconnected"}
+        {:else if appState.local.connectionStatus === "disconnected"}
             <div class="connection-label">Disconnected</div>
         {/if}
         <button
@@ -83,17 +81,17 @@
 </div>
 
 <style>
-    .statusbar {
+    .status-bar {
         display: flex;
         align-items: center;
         height: var(--status-bar-height);
     }
 
-    .statusbar.connected {
+    .status-bar.connected {
         background-color: var(--background-3);
     }
 
-    .statusbar.connecting {
+    .status-bar.connecting {
         background-color: color-mix(
             in oklab,
             var(--background-3) 30%,
@@ -101,7 +99,7 @@
         );
     }
 
-    .statusbar.disconnected {
+    .status-bar.disconnected {
         background-color: color-mix(
             in oklab,
             var(--background-3) 30%,

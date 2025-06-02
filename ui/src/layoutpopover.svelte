@@ -1,59 +1,140 @@
 <script lang="ts">
     import type { ContainerId, Layout } from "./constants";
 
+    import appState from "./appState.svelte";
+
     let {
         open = $bindable(),
-        layout = $bindable(),
-        activeContainerId = $bindable(),
+        activeDisplayId = $bindable(),
     }: {
         open: boolean;
-        layout: Layout;
-        activeContainerId: ContainerId;
+        activeDisplayId: ContainerId;
     } = $props();
 
-    function updateLayout(newLayout: Layout) {
-        layout = newLayout;
+    function updateLayout(layout: Layout) {
+        const previousLayout = appState.local.layout;
+        appState.local.layout = layout;
         switch (layout) {
             case "full":
-                if (activeContainerId > 1) {
-                    activeContainerId = 0;
+                if (activeDisplayId > 1) {
+                    activeDisplayId = 0;
                 }
                 break;
             case "h":
-            case "v":
-                if (activeContainerId > 2) {
-                    activeContainerId = 0;
+            case "v": {
+                if (activeDisplayId > 2) {
+                    activeDisplayId = 0;
+                }
+                if (appState.local.displays[1] == null) {
+                    appState.local.displays[1] = appState.local.displays[0];
                 }
                 break;
+            }
             case "hv1":
             case "hv2":
             case "vh1":
-            case "vh2":
-                if (activeContainerId > 3) {
-                    activeContainerId = 0;
+            case "vh2": {
+                if (activeDisplayId > 3) {
+                    activeDisplayId = 0;
+                }
+                if (appState.local.displays[1] == null) {
+                    // @ts-ignore
+                    appState.local.displays[1] = $state.snapshot(
+                        appState.local.displays[0],
+                    );
+                }
+                if (appState.local.displays[2] == null) {
+                    // @ts-ignore
+                    appState.local.displays[2] = $state.snapshot(
+                        appState.local.displays[
+                            layout === "vh1" || layout === "hv1" ? 0 : 1
+                        ],
+                    );
                 }
                 break;
-            default:
+            }
+            case "hv1v2":
+            case "vh1h2": {
+                if (appState.local.displays[1] == null) {
+                    // @ts-ignore
+                    appState.local.displays[1] = $state.snapshot(
+                        appState.local.displays[0],
+                    );
+                }
+                if (
+                    appState.local.displays[2] == null &&
+                    appState.local.displays[3] == null
+                ) {
+                    // @ts-ignore
+                    appState.local.displays[2] = $state.snapshot(
+                        appState.local.displays[1],
+                    );
+                    // @ts-ignore
+                    appState.local.displays[3] = $state.snapshot(
+                        appState.local.displays[0],
+                    );
+                } else if (appState.local.displays[2] == null) {
+                    // @ts-ignore
+                    appState.local.displays[2] = $state.snapshot(
+                        appState.local.displays[1],
+                    );
+                } else if (appState.local.displays[3] == null) {
+                    switch (previousLayout) {
+                        case "full":
+                        case "h":
+                        case "v":
+                        case "hv2":
+                        case "vh2":
+                        case "hv1v2":
+                        case "vh1h2": {
+                            // @ts-ignore
+                            appState.local.displays[3] = $state.snapshot(
+                                appState.local.displays[0],
+                            );
+                            break;
+                        }
+                        case "hv1":
+                        case "vh1": {
+                            // @ts-ignore
+                            appState.local.displays[3] = $state.snapshot(
+                                appState.local.displays[2],
+                            );
+                            // @ts-ignore
+                            appState.local.displays[2] = $state.snapshot(
+                                appState.local.displays[1],
+                            );
+                            if (activeDisplayId === 3) {
+                                activeDisplayId = 4;
+                            }
+                            break;
+                        }
+                        default: {
+                            throw new Error(`unsupported layout ${layout}`);
+                        }
+                    }
+                }
                 break;
+            }
+            default: {
+                throw new Error(`unsupported layout ${layout}`);
+            }
         }
     }
 </script>
 
 <div
-    class="layoutpopover {open ? '' : 'hidden'}"
+    class="layout-popover {open ? '' : 'hidden'}"
     role="button"
     tabindex="0"
     onclick={() => {
         open = false;
     }}
-    onkeydown={() => {
-        open = false;
-    }}
+    onkeydown={() => {}}
 >
     <div class="content {open ? '' : 'hidden'}">
         <button
             aria-label="Layout h"
-            class={layout === "h" ? "active" : ""}
+            class={appState.local.layout === "h" ? "active" : ""}
             onclick={() => {
                 updateLayout("h");
             }}
@@ -80,7 +161,7 @@
         </button>
         <button
             aria-label="Layout hv2"
-            class={layout === "hv2" ? "active" : ""}
+            class={appState.local.layout === "hv2" ? "active" : ""}
             onclick={() => {
                 updateLayout("hv2");
             }}
@@ -113,7 +194,7 @@
         </button>
         <button
             aria-label="Layout hv1"
-            class={layout === "hv1" ? "active" : ""}
+            class={appState.local.layout === "hv1" ? "active" : ""}
             onclick={() => {
                 updateLayout("hv1");
             }}
@@ -146,7 +227,7 @@
         </button>
         <button
             aria-label="Layout v"
-            class={layout === "v" ? "active" : ""}
+            class={appState.local.layout === "v" ? "active" : ""}
             onclick={() => {
                 updateLayout("v");
             }}
@@ -173,7 +254,7 @@
         </button>
         <button
             aria-label="Layout vh2"
-            class={layout === "vh2" ? "active" : ""}
+            class={appState.local.layout === "vh2" ? "active" : ""}
             onclick={() => {
                 updateLayout("vh2");
             }}
@@ -206,7 +287,7 @@
         </button>
         <button
             aria-label="Layout vh1"
-            class={layout === "vh1" ? "active" : ""}
+            class={appState.local.layout === "vh1" ? "active" : ""}
             onclick={() => {
                 updateLayout("vh1");
             }}
@@ -239,7 +320,7 @@
         </button>
         <button
             aria-label="Layout full"
-            class={layout === "full" ? "active" : ""}
+            class={appState.local.layout === "full" ? "active" : ""}
             onclick={() => {
                 updateLayout("full");
             }}
@@ -259,7 +340,7 @@
         </button>
         <button
             aria-label="Layout hv1v2"
-            class={layout === "hv1v2" ? "active" : ""}
+            class={appState.local.layout === "hv1v2" ? "active" : ""}
             onclick={() => {
                 updateLayout("hv1v2");
             }}
@@ -298,7 +379,7 @@
         </button>
         <button
             aria-label="Layout vh1h2"
-            class={layout === "vh1h2" ? "active" : ""}
+            class={appState.local.layout === "vh1h2" ? "active" : ""}
             onclick={() => {
                 updateLayout("vh1h2");
             }}
@@ -354,7 +435,7 @@
 </div>
 
 <style>
-    .layoutpopover {
+    .layout-popover {
         position: absolute;
         top: var(--status-bar-height);
         left: 0;

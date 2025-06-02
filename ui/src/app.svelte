@@ -1,31 +1,28 @@
 <script lang="ts">
-    import type { ContainerId, Layout } from "./constants";
+    import type { ContainerId } from "./constants";
 
-    import { appState } from "./protocol.svelte";
-    import DisplayPane from "./displaypane.svelte";
-    import StatusBar from "./statusbar.svelte";
-    import DevicePane from "./devicepane.svelte";
+    import {} from "./protocol.svelte";
+    import appState from "./appState.svelte";
+    import DisplayPane from "./displayPane.svelte";
+    import StatusBar from "./statusBar.svelte";
+    import DevicePane from "./devicePane.svelte";
     import Workspace from "./workspace.svelte";
 
-    let devicePaneOpen: boolean = $state(true);
-    let displayPaneOpen: boolean = $state(true);
-    let activeContainerId: ContainerId = $state(0);
-    let layout: Layout = $state("h");
+    let devicePaneOpen: boolean = $state(false);
+    let displayPaneOpen: boolean = $state(false);
+    let activeDisplayId: ContainerId = $state(0);
 </script>
 
 <main>
     <StatusBar
-        connectionStatus={appState.local.connectionStatus}
         bind:devicePaneOpen
         bind:displayPaneOpen
-        bind:layout
-        bind:activeContainerId
+        bind:activeDisplayId
     ></StatusBar>
     <div class="content">
         <DevicePane open={devicePaneOpen}></DevicePane>
-        <Workspace {layout} bind:activeContainerId bind:displayPaneOpen
-        ></Workspace>
-        <DisplayPane open={displayPaneOpen} {activeContainerId}></DisplayPane>
+        <Workspace bind:activeDisplayId></Workspace>
+        <DisplayPane open={displayPaneOpen} {activeDisplayId}></DisplayPane>
     </div>
 </main>
 

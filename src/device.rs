@@ -15,6 +15,14 @@ impl StreamId {
         bytes[1..4].copy_from_slice(&(device_id.0 & 0xFFFFFF).to_le_bytes()[0..3]);
         Self(u32::from_le_bytes(bytes))
     }
+
+    pub fn device_id(self) -> u32 {
+        (self.0 & 0xFFFFFF00) >> 8
+    }
+
+    pub fn stream_index(self) -> u8 {
+        (self.0 & 0xFF) as u8
+    }
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -48,6 +56,8 @@ pub struct Device {
         neuromorphic_drivers::Flag<neuromorphic_drivers::Error, neuromorphic_drivers::UsbOverflow>,
     record_target: std::sync::Arc<std::sync::Mutex<RecordTarget>>,
     packed_event_rate: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    rising_trigger_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    falling_trigger_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -56,6 +66,8 @@ pub struct DeviceSampler {
     inner: std::sync::Arc<neuromorphic_drivers::Device>,
     record_target: std::sync::Arc<std::sync::Mutex<SamplerRecordTarget>>,
     packed_event_rate: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    rising_trigger_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    falling_trigger_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -67,14 +79,75 @@ pub struct DeviceProxy {
 }
 
 #[derive(Debug)]
-pub struct Sample {
-    id: DeviceId,
+struct Davis346Sample {
     system_time: u64,
     system_timestamp: u64,
-    illuminance: u32,
-    temperature: f32,
     on_event_rate: f32,
     off_event_rate: f32,
+}
+
+#[derive(Debug)]
+struct Evk3HdSample {
+    system_time: u64,
+    system_timestamp: u64,
+    on_event_rate: f32,
+    off_event_rate: f32,
+}
+
+#[derive(Debug)]
+struct Evk4Sample {
+    system_time: u64,
+    system_timestamp: u64,
+    on_event_rate: f32,
+    off_event_rate: f32,
+    rising_trigger_count: u32,
+    falling_trigger_count: u32,
+    illuminance: u32,
+    temperature: f32,
+}
+
+#[derive(Debug)]
+enum Sample {
+    Davis346(Davis346Sample),
+    Evk3HdSample(Evk3HdSample),
+    Evk4Sample(Evk4Sample),
+}
+
+impl Sample {
+    fn byte_length(&self) -> usize {
+        match self {
+            Sample::Davis346(_) => 24,
+            Sample::Evk3HdSample(_) => 24,
+            Sample::Evk4Sample(_) => 40,
+        }
+    }
+
+    fn serialize_to(&self, buffer: &mut Vec<u8>) {
+        match self {
+            Sample::Davis346(davis346_sample) => {
+                buffer.extend(&davis346_sample.system_time.to_le_bytes()); // 8
+                buffer.extend(&davis346_sample.system_timestamp.to_le_bytes()); // 8
+                buffer.extend(&davis346_sample.on_event_rate.to_le_bytes()); // 4
+                buffer.extend(&davis346_sample.off_event_rate.to_le_bytes()); // 4
+            }
+            Sample::Evk3HdSample(evk3_hd_sample) => {
+                buffer.extend(&evk3_hd_sample.system_time.to_le_bytes()); // 8
+                buffer.extend(&evk3_hd_sample.system_timestamp.to_le_bytes()); // 8
+                buffer.extend(&evk3_hd_sample.on_event_rate.to_le_bytes()); // 4
+                buffer.extend(&evk3_hd_sample.off_event_rate.to_le_bytes()); // 4
+            }
+            Sample::Evk4Sample(evk4_sample) => {
+                buffer.extend(&evk4_sample.system_time.to_le_bytes()); // 8
+                buffer.extend(&evk4_sample.system_timestamp.to_le_bytes()); // 8
+                buffer.extend(&evk4_sample.on_event_rate.to_le_bytes()); // 4
+                buffer.extend(&evk4_sample.off_event_rate.to_le_bytes()); // 4
+                buffer.extend(&evk4_sample.rising_trigger_count.to_le_bytes()); // 4
+                buffer.extend(&evk4_sample.falling_trigger_count.to_le_bytes()); // 4
+                buffer.extend(&evk4_sample.illuminance.to_le_bytes()); // 4
+                buffer.extend(&evk4_sample.temperature.to_le_bytes()); // 4
+            }
+        }
+    }
 }
 
 impl Device {
@@ -89,6 +162,8 @@ impl Device {
     ) -> ((u8, u8), Device, DeviceSampler, DeviceProxy) {
         let inner = std::sync::Arc::new(device);
         let packed_event_rate = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let rising_trigger_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let falling_trigger_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         (
             (listed_device.bus_number, listed_device.address),
@@ -100,6 +175,8 @@ impl Device {
                 flag,
                 record_target: std::sync::Arc::new(std::sync::Mutex::new(RecordTarget::default())),
                 packed_event_rate: packed_event_rate.clone(),
+                rising_trigger_count: rising_trigger_count.clone(),
+                falling_trigger_count: falling_trigger_count.clone(),
                 running: running.clone(),
             },
             DeviceSampler {
@@ -109,6 +186,8 @@ impl Device {
                     SamplerRecordTarget::default(),
                 )),
                 packed_event_rate,
+                rising_trigger_count,
+                falling_trigger_count,
                 running,
             },
             DeviceProxy {
@@ -149,7 +228,7 @@ impl Device {
 
         loop {
             if let Err(error) = self.flag.load_error() {
-                println!("{error:?}"); // @DEV
+                println!("device error: {error:?}"); // @DEV
                 self.running
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 let mut context_guard = context.blocking_lock();
@@ -172,7 +251,6 @@ impl Device {
                     .instant
                     .duration_since(time_reference)
                     .as_micros() as u64;
-
                 loop {
                     let (events_lengths, position) =
                         adapter.events_lengths_until(buffer_view.slice, data_buffer_end_t);
@@ -181,10 +259,22 @@ impl Device {
                         neuromorphic_drivers::adapters::EventsLengths::Davis346(events_lengths) => {
                             data_buffer_on_event_count += events_lengths.on;
                             data_buffer_off_event_count += events_lengths.off;
+                            self.rising_trigger_count.fetch_add(
+                                events_lengths.trigger as u32,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                         }
                         neuromorphic_drivers::adapters::EventsLengths::Evt3(events_lengths) => {
                             data_buffer_on_event_count += events_lengths.on;
                             data_buffer_off_event_count += events_lengths.off;
+                            self.rising_trigger_count.fetch_add(
+                                events_lengths.trigger_rising as u32,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            self.falling_trigger_count.fetch_add(
+                                events_lengths.trigger_falling as u32,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                         }
                     }
                     if position / 2 < buffer_view.slice.len() / 2 {
@@ -212,7 +302,6 @@ impl Device {
                         }
                         data_buffer_on_event_count = 0;
                         data_buffer_off_event_count = 0;
-
                         {
                             let router_guard = router.read().expect("router mutex is not poisoned");
                             if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
@@ -227,12 +316,14 @@ impl Device {
                                             ) => todo!(),
                                             neuromorphic_drivers::adapters::State::Evt3(state) => {
                                                 let data_length = data_buffer.len().min(
-                                                    constants::PACKET_MAXIMUM_LENGTH as usize - 34,
+                                                    constants::PACKET_MAXIMUM_LENGTH as usize - 50,
                                                 );
-                                                let total_length = data_length + 34;
+                                                let total_length = data_length + 50;
                                                 buffer.clear();
                                                 buffer.reserve_exact(total_length);
                                                 buffer.extend(&(total_length as u32).to_le_bytes()); // 4
+                                                buffer.extend(&system_time.to_le_bytes()); // 8
+                                                buffer.extend(&system_timestamp.to_le_bytes()); // 8
                                                 buffer.extend(&state.t.to_le_bytes()); // 8
                                                 buffer.extend(&state.overflows.to_le_bytes()); // 4
                                                 buffer.extend(&state.previous_msb_t.to_le_bytes()); // 2
@@ -306,43 +397,104 @@ impl DeviceSampler {
                     next_sample += constants::SAMPLING_PERIOD;
                 }
             }
-            let (illuminance, temperature) = match self.inner.as_ref() {
-                neuromorphic_drivers::Device::InivationDavis346(_) => (u32::MAX, f32::NAN),
-                neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => (u32::MAX, f32::NAN),
+            let mut sample = match self.inner.as_ref() {
+                neuromorphic_drivers::Device::InivationDavis346(_) => {
+                    Sample::Davis346(Davis346Sample {
+                        system_time: 0,
+                        system_timestamp: 0,
+                        on_event_rate: 0.0,
+                        off_event_rate: 0.0,
+                    })
+                }
+                neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
+                    Sample::Evk3HdSample(Evk3HdSample {
+                        system_time: 0,
+                        system_timestamp: 0,
+                        on_event_rate: 0.0,
+                        off_event_rate: 0.0,
+                    })
+                }
                 neuromorphic_drivers::Device::PropheseeEvk4(device) => {
                     let illuminance = device.illuminance().unwrap_or(u32::MAX);
                     let temperature = device
                         .temperature_celsius()
                         .map_or(f32::NAN, |temperature_celsius| temperature_celsius.0);
-                    (illuminance, temperature)
+                    Sample::Evk4Sample(Evk4Sample {
+                        system_time: 0,
+                        system_timestamp: 0,
+                        on_event_rate: 0.0,
+                        off_event_rate: 0.0,
+                        rising_trigger_count: self
+                            .rising_trigger_count
+                            .swap(0, std::sync::atomic::Ordering::Relaxed),
+                        falling_trigger_count: self
+                            .falling_trigger_count
+                            .swap(0, std::sync::atomic::Ordering::Relaxed),
+                        illuminance,
+                        temperature,
+                    })
                 }
             };
-            let packed_event_rate = self
-                .packed_event_rate
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let packed_event_rate_bytes = packed_event_rate.to_le_bytes();
-            let system_time = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::default())
-                .as_micros() as u64;
-            let system_timestamp = std::time::Instant::now()
-                .duration_since(time_reference)
-                .as_micros() as u64;
-            let sample = Sample {
-                id: self.id,
-                system_time,
-                system_timestamp,
-                illuminance,
-                temperature,
-                on_event_rate: f32::from_le_bytes(
-                    packed_event_rate_bytes[0..4].try_into().expect("4 bytes"),
-                ),
-                off_event_rate: f32::from_le_bytes(
-                    packed_event_rate_bytes[4..8].try_into().expect("4 bytes"),
-                ),
-            };
-
-            // @DEV send state on dedicated channel (no pull)
+            {
+                let packed_event_rate = self
+                    .packed_event_rate
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let packed_event_rate_bytes = packed_event_rate.to_le_bytes();
+                let on_event_rate =
+                    f32::from_le_bytes(packed_event_rate_bytes[0..4].try_into().expect("4 bytes"));
+                let off_event_rate =
+                    f32::from_le_bytes(packed_event_rate_bytes[4..8].try_into().expect("4 bytes"));
+                let system_time = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::default())
+                    .as_micros() as u64;
+                let system_timestamp = std::time::Instant::now()
+                    .duration_since(time_reference)
+                    .as_micros() as u64;
+                match &mut sample {
+                    Sample::Davis346(davis346_sample) => {
+                        davis346_sample.system_time = system_time;
+                        davis346_sample.system_timestamp = system_timestamp;
+                        davis346_sample.on_event_rate = on_event_rate;
+                        davis346_sample.off_event_rate = off_event_rate;
+                    }
+                    Sample::Evk3HdSample(evk3_hd_sample) => {
+                        evk3_hd_sample.system_time = system_time;
+                        evk3_hd_sample.system_timestamp = system_timestamp;
+                        evk3_hd_sample.on_event_rate = on_event_rate;
+                        evk3_hd_sample.off_event_rate = off_event_rate;
+                    }
+                    Sample::Evk4Sample(evk4_sample) => {
+                        evk4_sample.system_time = system_time;
+                        evk4_sample.system_timestamp = system_timestamp;
+                        evk4_sample.on_event_rate = on_event_rate;
+                        evk4_sample.off_event_rate = off_event_rate;
+                    }
+                }
+            }
+            {
+                let router_guard = router.read().expect("router mutex is not poisoned");
+                if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
+                    for (client_id, sender) in clients_ids_and_senders {
+                        let buffer = { stack.lock().expect("packet stack is not poisoned").pop() };
+                        if let Some(mut buffer) = buffer {
+                            let total_length = sample.byte_length() + 4;
+                            buffer.clear();
+                            buffer.reserve_exact(total_length);
+                            buffer.extend(&(total_length as u32).to_le_bytes()); // 4
+                            sample.serialize_to(&mut buffer);
+                            if let Ok(permit) = sender.try_reserve() {
+                                permit.send(buffer);
+                            } else {
+                                stack
+                                    .lock()
+                                    .expect("sample stack is not poisoned")
+                                    .push(buffer);
+                            }
+                        }
+                    }
+                }
+            }
         }
         println!("sampler loop done"); // @DEV
 

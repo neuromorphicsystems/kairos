@@ -3,7 +3,7 @@
 </script>
 
 <style>
-    .devicepane {
+    .device-pane {
         width: 0;
         border-top: 1px solid var(--background-0);
         height: calc(100vh - var(--status-bar-height));
@@ -12,7 +12,7 @@
         position: relative;
     }
 
-    .devicepane.open {
+    .device-pane.open {
         width: var(--device-pane-width);
     }
 
@@ -26,7 +26,7 @@
     }
 </style>
 
-<div class="devicepane {open ? "open" : ""}">
+<div class="device-pane {open ? "open" : ""}">
     <div class=content>
 
     </div>

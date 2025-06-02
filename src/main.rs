@@ -6,25 +6,19 @@ mod stack;
 
 use clap::Parser;
 
-/*
-use tokio::task::spawn_blocking;
-use tokio::runtime::Handle;
-
-async fn example() {
-    let handle = Handle::current();
-    spawn_blocking(move || {
-        // do something blocking
-
-        handle.block_on(async {
-            // do something async
-        });
-
-        // do something blocking
-
-        // ...
-    });
+fn utc_string() -> String {
+    chrono::Local::now()
+        .naive_utc()
+        .format("%F %T%.3f")
+        .to_string()
 }
-*/
+
+fn utc_string_path_safe() -> String {
+    chrono::Local::now()
+        .naive_utc()
+        .format("%FT%H-%M-%S%.6fZ")
+        .to_string()
+}
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -34,9 +28,6 @@ struct Args {
 
     #[arg(short = 'q', long, default_value_t = 3001)]
     transport_port: u16,
-
-    #[arg(short = 'n', long, default_value_t = -1)]
-    maximum_client_count: i64,
 
     #[arg(short = 'c', long, default_value_t = 60)]
     maximum_client_buffer_count: usize,
@@ -80,9 +71,7 @@ struct Context {
     time_reference: std::time::Instant,
     host_to_endpoint: std::collections::HashMap<String, Endpoint>,
     next_transport_port: u16,
-    maximum_client_count: Option<usize>,
     maximum_client_buffer_count: usize,
-    client_count: usize,
     next_client_id: client::ClientId,
     id_to_client: std::collections::HashMap<client::ClientId, client::ClientProxy>,
     shared_client_state: protocol::SharedClientState,
@@ -138,7 +127,7 @@ impl Context {
             .collect();
         std::mem::swap(&mut self.shared_client_state.devices, &mut devices);
         if let Err(error) = self.broadcast_shared_client_state() {
-            println!("{error}");
+            println!("broadcast_shared_client_state error: {error:?}");
         }
     }
 }
@@ -147,7 +136,11 @@ impl Context {
 async fn main() -> Result<(), anyhow::Error> {
     let time_reference = std::time::Instant::now();
     let args = Args::parse();
-    println!("Listening for HTTP requests on port {}", args.http_port);
+    println!(
+        "{} | Listening for HTTP requests on port {}",
+        utc_string(),
+        args.http_port
+    );
     let tcp_listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), args.http_port))
             .await?;
@@ -155,13 +148,7 @@ async fn main() -> Result<(), anyhow::Error> {
         time_reference,
         host_to_endpoint: std::collections::HashMap::new(),
         next_transport_port: args.transport_port,
-        maximum_client_count: if args.maximum_client_count >= 0 {
-            Some(args.maximum_client_count as usize)
-        } else {
-            None
-        },
         maximum_client_buffer_count: args.maximum_client_buffer_count,
-        client_count: 0,
         next_client_id: client::ClientId(0),
         id_to_client: std::collections::HashMap::new(),
         shared_client_state: protocol::SharedClientState {
@@ -208,7 +195,11 @@ async fn main() -> Result<(), anyhow::Error> {
                                 if let Ok(device) =
                                     listed_device.open(None, None, event_loop, flag.clone())
                                 {
-                                    println!("new device, id {}", next_device_id); // @DEV
+                                    println!(
+                                        "{} | new device, id {}",
+                                        utc_string(),
+                                        next_device_id
+                                    ); // @DEV
                                     devices_and_proxies.push(device::Device::new(
                                         device::DeviceId(next_device_id),
                                         listed_device,
@@ -232,7 +223,6 @@ async fn main() -> Result<(), anyhow::Error> {
                                     .insert(device::StreamId::new(device_proxy.id, 0), Vec::new());
                                 router_guard
                                     .insert(device::StreamId::new(device_proxy.id, 1), Vec::new());
-                                println!("{:?}", &router_guard); // @DEV
                             }
                             {
                                 let context = context.clone();
@@ -273,13 +263,10 @@ async fn main() -> Result<(), anyhow::Error> {
                     .lock()
                     .expect("packet stack mutex is not poisoned")
                     .shrink_unused();
-
-                /* @DEV
                 sample_stack
                     .lock()
                     .expect("sample stack mutex is not poisoned")
                     .shrink_unused();
-                */
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         });
@@ -287,7 +274,6 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // poll the TCP stream for new connections
     loop {
-        println!("poll TCP stream"); // @DEV
         if let Ok((stream, _)) = tcp_listener.accept().await {
             tokio::spawn(handle_tcp_stream(context.clone(), stream));
         }
@@ -308,7 +294,7 @@ async fn handle_tcp_stream(
         )
         .await
     {
-        println!("{error:?}");
+        println!("{} | serve_connection error: {:?}", utc_string(), error);
     }
 }
 
@@ -382,8 +368,10 @@ async fn handle_http_request(
                                     )?,
                                 ));
                                 println!(
-                                    "Listening for Transport requests on {}:{}",
-                                    host, endpoint.port
+                                    "{} | Listening for Transport requests on {}:{}",
+                                    utc_string(),
+                                    host,
+                                    endpoint.port
                                 );
                                 let (hash, port) = (endpoint.hash.clone(), endpoint.port);
                                 let _ = context_guard
@@ -436,14 +424,15 @@ async fn handle_transport_server(
     terminated: std::sync::Arc<tokio::sync::Notify>,
     transport_server: wtransport::endpoint::Endpoint<wtransport::endpoint::endpoint_side::Server>,
 ) {
+    let mut incoming_session_id = 0;
     loop {
-        println!("poll transport session"); // @DEV
         tokio::select! {
             _ = terminate.notified() => {
                 break;
             }
             incoming_session = transport_server.accept() => {
-                tokio::spawn(handle_transport_session_wrapper(context.clone(), incoming_session));
+                tokio::spawn(handle_transport_session_wrapper(context.clone(), incoming_session, incoming_session_id));
+                incoming_session_id += 1;
             }
         }
     }
@@ -455,34 +444,30 @@ async fn handle_transport_server(
 async fn handle_transport_session_wrapper(
     context: std::sync::Arc<tokio::sync::Mutex<Context>>,
     incoming_session: wtransport::endpoint::IncomingSession,
+    incoming_session_id: usize,
 ) {
+    if let Err(error) =
+        handle_transport_session(context.clone(), incoming_session, incoming_session_id).await
     {
-        let mut context_guard = context.lock().await;
-        if let Some(maximum_client_count) = context_guard.maximum_client_count {
-            println!("maximum client count reached ({maximum_client_count})");
-            // @DEV semd error to incoming_session
-            return;
-        }
-        context_guard.client_count += 1;
-    }
-    if let Err(error) = handle_transport_session(context.clone(), incoming_session).await {
-        println!("{error:?}");
-    }
-    {
-        let mut context_guard = context.lock().await;
-        if let Some(client_count) = context_guard.client_count.checked_sub(1) {
-            context_guard.client_count = client_count;
-        }
+        println!(
+            "{} | handle_transport_session (session id {}) error: {:?}",
+            utc_string(),
+            incoming_session_id,
+            error
+        );
     }
 }
 
 async fn handle_transport_session(
     context: std::sync::Arc<tokio::sync::Mutex<Context>>,
     incoming_session: wtransport::endpoint::IncomingSession,
+    incoming_session_id: usize,
 ) -> Result<(), anyhow::Error> {
     let session_request = incoming_session.await?;
     println!(
-        "New session: Authority: '{}', Path: '{}'",
+        "{} | new session (session id {}): authority {}, path {}",
+        utc_string(),
+        incoming_session_id,
         session_request.authority(),
         session_request.path()
     );
@@ -500,8 +485,17 @@ async fn handle_transport_session(
         context.clone(),
         shared_client_state_receiver,
         connection,
+        incoming_session_id,
     )
     .await;
+
+    println!(
+        "{} | manage_connection (session id {}) returned {:?}",
+        utc_string(),
+        incoming_session_id,
+        result
+    ); // @DEV
+
     {
         let mut context_guard = context.lock().await;
         let _ = context_guard.id_to_client.remove(&client_id);

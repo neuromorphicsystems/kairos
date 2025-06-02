@@ -1,19 +1,17 @@
 <script lang="ts">
     import type { ContainerId, Layout } from "./constants";
+
+    import appState from "./appState.svelte";
     import Container from "./container.svelte";
 
     let {
-        layout,
-        activeContainerId = $bindable(),
-        displayPaneOpen = $bindable(),
+        activeDisplayId = $bindable(),
     }: {
-        activeContainerId: ContainerId;
-        displayPaneOpen: boolean;
-        layout: Layout;
+        activeDisplayId: ContainerId;
     } = $props();
     const layoutToPosition: { [key in Layout]: number[] } = $state({
         full: [],
-        h: [0.5],
+        h: [0.75],
         hv1: [0.5, 0.5],
         hv2: [0.5, 0.5],
         v: [0.5],
@@ -104,27 +102,20 @@
 <svelte:window onmouseup={mouseUp} onmousemove={mouseMove} />
 
 <div class="workspace" bind:this={workspace}>
-    {#if layout === "full"}
-        <Container
-            id={1}
-            size={1.0}
-            bind:activeId={activeContainerId}
-            bind:displayPaneOpen
-        >
-        </Container>
-    {:else if layout === "h"}
+    {#if appState.local.layout === "full"}
+        <Container id={1} size={1.0} bind:activeId={activeDisplayId}
+        ></Container>
+    {:else if appState.local.layout === "h"}
         <div class="h">
             <Container
                 id={1}
                 size={layoutToPosition.h[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
             <Container
                 id={2}
                 size={1.0 - layoutToPosition.h[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
@@ -134,27 +125,24 @@
             onmousedown={event => mouseDown(event, "h", 0)}
             role="none"
         ></div>
-    {:else if layout === "hv1"}
+    {:else if appState.local.layout === "hv1"}
         <div class="h">
             <div class="v" style="flex-grow: {layoutToPosition.hv1[0]}">
                 <Container
-                    id={2}
+                    id={1}
                     size={layoutToPosition.hv1[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
                     size={1.0 - layoutToPosition.hv1[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <Container
-                id={1}
+                id={2}
                 size={1.0 - layoutToPosition.hv1[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
@@ -171,26 +159,23 @@
             onmousedown={event => mouseDown(event, "hv1", 0)}
             role="none"
         ></div>
-    {:else if layout === "hv2"}
+    {:else if appState.local.layout === "hv2"}
         <div class="h">
             <Container
                 id={1}
                 size={layoutToPosition.hv2[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
             <div class="v" style="flex-grow: {1.0 - layoutToPosition.hv2[0]}">
                 <Container
                     id={2}
                     size={layoutToPosition.hv2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
                     size={1.0 - layoutToPosition.hv2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
@@ -209,19 +194,17 @@
             onmousedown={event => mouseDown(event, "hv2", 0)}
             role="none"
         ></div>
-    {:else if layout === "v"}
+    {:else if appState.local.layout === "v"}
         <div class="v">
             <Container
                 id={1}
                 size={layoutToPosition.v[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
             <Container
                 id={2}
                 size={1.0 - layoutToPosition.v[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
@@ -231,27 +214,24 @@
             onmousedown={event => mouseDown(event, "v", 0)}
             role="none"
         ></div>
-    {:else if layout === "vh1"}
+    {:else if appState.local.layout === "vh1"}
         <div class="v">
             <div class="h" style="flex-grow: {layoutToPosition.vh1[0]}">
                 <Container
-                    id={2}
+                    id={1}
                     size={layoutToPosition.vh1[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
                     size={1.0 - layoutToPosition.vh1[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <Container
-                id={1}
+                id={2}
                 size={1.0 - layoutToPosition.vh1[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
@@ -268,26 +248,23 @@
             onmousedown={event => mouseDown(event, "vh1", 0)}
             role="none"
         ></div>
-    {:else if layout === "vh2"}
+    {:else if appState.local.layout === "vh2"}
         <div class="v">
             <Container
                 id={1}
                 size={layoutToPosition.vh2[0]}
-                bind:activeId={activeContainerId}
-                bind:displayPaneOpen
+                bind:activeId={activeDisplayId}
             ></Container>
             <div class="h" style="flex-grow: {1.0 - layoutToPosition.vh2[0]}">
                 <Container
                     id={2}
                     size={layoutToPosition.vh2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
                     size={1.0 - layoutToPosition.vh2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
@@ -306,34 +283,30 @@
             onmousedown={event => mouseDown(event, "vh2", 0)}
             role="none"
         ></div>
-    {:else if layout === "hv1v2"}
+    {:else if appState.local.layout === "hv1v2"}
         <div class="h">
             <div class="v" style="flex-grow: {layoutToPosition.hv1v2[0]}">
                 <Container
                     id={1}
                     size={layoutToPosition.hv1v2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
-                    id={2}
+                    id={4}
                     size={1.0 - layoutToPosition.hv1v2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <div class="v" style="flex-grow: {1.0 - layoutToPosition.hv1v2[0]}">
                 <Container
-                    id={3}
+                    id={2}
                     size={layoutToPosition.hv1v2[2]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
-                    id={4}
+                    id={3}
                     size={1.0 - layoutToPosition.hv1v2[2]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
@@ -359,34 +332,30 @@
             onmousedown={event => mouseDown(event, "hv1v2", 0)}
             role="none"
         ></div>
-    {:else if layout === "vh1h2"}
+    {:else if appState.local.layout === "vh1h2"}
         <div class="v">
             <div class="h" style="flex-grow: {layoutToPosition.vh1h2[0]}">
                 <Container
                     id={1}
                     size={layoutToPosition.vh1h2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
-                    id={2}
+                    id={4}
                     size={1.0 - layoutToPosition.vh1h2[1]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <div class="h" style="flex-grow: {1.0 - layoutToPosition.vh1h2[0]}">
                 <Container
-                    id={3}
+                    id={2}
                     size={layoutToPosition.vh1h2[2]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
-                    id={4}
+                    id={3}
                     size={1.0 - layoutToPosition.vh1h2[2]}
-                    bind:activeId={activeContainerId}
-                    bind:displayPaneOpen
+                    bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
@@ -427,7 +396,7 @@
 
     .control-h {
         position: absolute;
-        z-index: 1;
+        z-index: 5;
         height: 12px;
         opacity: 0;
         cursor: row-resize;
@@ -435,7 +404,7 @@
 
     .control-v {
         position: absolute;
-        z-index: 1;
+        z-index: 5;
         width: 12px;
         opacity: 0;
         cursor: col-resize;

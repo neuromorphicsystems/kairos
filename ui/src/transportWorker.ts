@@ -1,5 +1,46 @@
 import * as constants from "./constants";
 
+const idToStream: Map<number, UnidirectionalStream> = new Map();
+let nextStreamId: number = 0;
+let messageStream: MessageStream = null;
+let started = false;
+
+async function readDescription(
+    reader: ReadableStreamBYOBReader,
+): Promise<[number, number, number]> {
+    let buffer = new ArrayBuffer(12);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+        const { value: view, done } = await reader.read(
+            new Uint8Array(buffer, offset, buffer.byteLength - offset),
+        );
+        if (done) {
+            throw new Error("new stream closed before sending an id");
+        }
+        buffer = view.buffer;
+        offset += view.length;
+    }
+    const [sourceId, recommendedBufferCount, maximumLength] = new Uint32Array(
+        buffer,
+    );
+    return [sourceId, recommendedBufferCount, maximumLength];
+}
+
+function unidirectionalStreamOnBuffer(
+    stream: UnidirectionalStream,
+    buffer: ArrayBuffer,
+) {
+    postMessage(
+        {
+            type: constants.TRANSPORT_TO_DECODE_BUFFER,
+            streamId: stream.streamId,
+            sourceId: stream.sourceId,
+            buffer,
+        },
+        { transfer: [buffer] },
+    );
+}
+
 class UnidirectionalStream {
     streamId: number;
     sourceId: number;
@@ -9,9 +50,8 @@ class UnidirectionalStream {
         (error: any) => void,
     ];
     reader: ReadableStreamBYOBReader;
-    buffer: ArrayBuffer;
-    size: number;
-    offset: number;
+    onBuffer: (stream: UnidirectionalStream, buffer: ArrayBuffer) => void;
+    running: boolean;
 
     constructor(
         streamId: number,
@@ -19,6 +59,7 @@ class UnidirectionalStream {
         bufferCount: number,
         bufferSize: number,
         reader: ReadableStreamBYOBReader,
+        onBuffer: (stream: UnidirectionalStream, buffer: ArrayBuffer) => void,
     ) {
         this.streamId = streamId;
         this.sourceId = sourceId;
@@ -27,87 +68,77 @@ class UnidirectionalStream {
             .map(_ => new ArrayBuffer(bufferSize));
         this.bufferPromiseResolveReject = null;
         this.reader = reader;
-        this.buffer = null;
-        this.size = 0;
-        this.offset = 0;
+        this.onBuffer = onBuffer;
+        this.running = true;
+        this.spawn();
     }
 
-    async nextWithBuffer(): Promise<[number, [boolean, ArrayBuffer]]> {
-        if (this.size === 0 && this.offset >= 4) {
-            this.size = new Uint32Array(this.buffer, 0, 1)[0];
-            if (this.offset === this.size) {
-                const buffer = this.buffer;
-                this.buffer = null;
-                this.size = 0;
-                this.offset = 0;
-                return [this.streamId, [false, buffer]];
-            }
-            if (this.offset > this.size) {
-                const newBuffer = await this.nextBuffer();
-
-                console.log(`@1 newBuffer.byteLength=${newBuffer.byteLength}, this.offset=${this.offset}, this.size=${this.size}`); // @DEV
-
-                new Uint8Array(newBuffer, 0, this.offset - this.size).set(
-                    new Uint8Array(this.buffer, this.size, this.offset - this.size),
-                    0,
+    async spawn() {
+        try {
+            let buffer: ArrayBuffer = null;
+            let size = 0;
+            let offset = 0;
+            while (this.running) {
+                if (buffer == null) {
+                    buffer = await this.nextBuffer();
+                }
+                if (size === 0 && offset >= 4) {
+                    size = new Uint32Array(buffer, 0, 1)[0];
+                }
+                if (size > 0) {
+                    if (offset === size) {
+                        this.onBuffer(this, buffer);
+                        buffer = null;
+                        size = 0;
+                        offset = 0;
+                        continue;
+                    }
+                    if (offset > size) {
+                        const newBuffer = await this.nextBuffer();
+                        new Uint8Array(newBuffer, 0, offset - size).set(
+                            new Uint8Array(buffer, size, offset - size),
+                            0,
+                        );
+                        this.onBuffer(this, buffer);
+                        offset -= size;
+                        size = 0;
+                        buffer = newBuffer;
+                        continue;
+                    }
+                }
+                const { value: view, done } = await this.reader.read(
+                    new Uint8Array(
+                        buffer,
+                        offset,
+                        (size === 0 ? buffer.byteLength : size) - offset,
+                    ),
                 );
-                const buffer = this.buffer;
-                this.buffer = newBuffer;
-                this.offset -= this.size;
-                this.size = 0;
-                return [this.streamId, [false, buffer]];
+                if (done) {
+                    break;
+                }
+                buffer = view.buffer;
+                offset += view.length;
             }
+        } catch (error) {
+            console.error(
+                `streamId=${this.streamId}, sourceId=${this.sourceId}, error: ${error}`,
+            );
         }
-        const { value: view, done } = await this.reader.read(
-            new Uint8Array(
-                this.buffer,
-                this.offset,
-                (this.size === 0 ? this.buffer.byteLength : this.size) -
-                    this.offset,
-            ),
-        );
-        if (done) {
-            return [this.streamId, [true, null]];
+        if (this.running) {
+            this.abort();
         }
-        this.buffer = view.buffer;
-        this.offset += view.length;
-        if (this.size === 0) {
-            if (this.offset < 4) {
-                return [this.streamId, [false, null]];
-            }
-            this.size = new Uint32Array(this.buffer, 0, 1)[0];
-        }
-        if (this.offset < this.size) {
-            return [this.streamId, [false, null]];
-        }
-        if (this.offset === this.size) {
-            const buffer = this.buffer;
-            this.buffer = null;
-            this.size = 0;
-            this.offset = 0;
-            return [this.streamId, [false, buffer]];
-        }
-        const newBuffer = await this.nextBuffer();
-
-
-        console.log(`@2 this.buffer.byteLength=${this.buffer.byteLength} newBuffer.byteLength=${newBuffer.byteLength}, this.offset=${this.offset}, this.size=${this.size}`); // @DEV
-
-        new Uint8Array(newBuffer, 0, this.offset - this.size).set(
-            new Uint8Array(this.buffer, this.size, this.offset - this.size),
-            0,
-        );
-        const buffer = this.buffer;
-        this.buffer = newBuffer;
-        this.offset -= this.size;
-        this.size = 0;
-        return [this.streamId, [false, buffer]];
     }
 
-    async next(): Promise<[number, [boolean, ArrayBuffer]]> {
-        if (this.buffer == null) {
-            this.buffer = await this.nextBuffer();
+    abort() {
+        this.running = false;
+        if (this.bufferPromiseResolveReject != null) {
+            this.bufferPromiseResolveReject[1]("abort");
+            this.bufferPromiseResolveReject = null;
         }
-        return this.nextWithBuffer();
+        this.reader.cancel();
+        console.error(
+            `stream ${this.streamId} (source ${this.sourceId}) aborted`,
+        );
     }
 
     async nextBuffer(): Promise<ArrayBuffer> {
@@ -120,8 +151,9 @@ class UnidirectionalStream {
     }
 }
 
-class BidirectionalStream extends UnidirectionalStream {
+class MessageStream extends UnidirectionalStream {
     writer: WritableStreamDefaultWriter;
+    pingMessage: Uint8Array;
 
     constructor(
         streamId: number,
@@ -130,19 +162,123 @@ class BidirectionalStream extends UnidirectionalStream {
         bufferSize: number,
         reader: ReadableStreamBYOBReader,
         sender: WritableStream,
+        onBuffer: (stream: MessageStream, buffer: ArrayBuffer) => void,
     ) {
-        super(streamId, sourceId, bufferCount, bufferSize, reader);
+        super(streamId, sourceId, bufferCount, bufferSize, reader, onBuffer);
         this.writer = sender.getWriter();
+        const encoder = new TextEncoder();
+        const buffer = encoder.encode(JSON.stringify({ type: "Ping" }));
+        const bufferWithSize = new ArrayBuffer(buffer.length + 4);
+        new Uint32Array(bufferWithSize, 0, 1)[0] = bufferWithSize.byteLength;
+        new Uint8Array(bufferWithSize, 4, buffer.length).set(buffer, 0);
+        this.pingMessage = new Uint8Array(
+            bufferWithSize,
+            0,
+            bufferWithSize.byteLength,
+        );
+        this.spawnPing();
+    }
+
+    abort() {
+        super.abort();
+        this.writer.abort();
+    }
+
+    async spawnPing() {
+        try {
+            while (this.running) {
+                await this.writer.write(this.pingMessage);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        } catch (error) {
+            console.error(this.streamId, this.sourceId, error);
+        }
+        if (this.running) {
+            this.abort();
+        }
     }
 }
 
-const idToStream: Map<number, UnidirectionalStream | BidirectionalStream> =
-    new Map();
-let messageStreamId: number = null;
-const streamIdToPromise: Map<number, Promise<[number, any]>> = new Map();
+async function spawnUnidirectionalStreams(
+    unidirectionalStreamsReader: ReadableStreamDefaultReader,
+) {
+    while (true) {
+        const { done, value } = await unidirectionalStreamsReader.read();
+        if (done) {
+            throw new Error("spawnUnidirectionalStreams is done");
+        }
+        const reader = value.getReader({ mode: "byob" });
+        const [sourceId, recommendedBufferCount, maximumLength] =
+            await readDescription(reader);
+        idToStream.set(
+            nextStreamId,
+            new UnidirectionalStream(
+                nextStreamId,
+                sourceId,
+                recommendedBufferCount,
+                maximumLength,
+                reader,
+                unidirectionalStreamOnBuffer,
+            ),
+        );
+        ++nextStreamId;
+    }
+}
 
-let transport: WebTransport = null;
-let nextStreamId: number = 0;
+async function spawnBidirectionalStreams(
+    bidirectionalStreamsReader: ReadableStreamDefaultReader,
+) {
+    while (true) {
+        const { done, value } = await bidirectionalStreamsReader.read();
+        if (done) {
+            throw new Error("spawnBidirectionalStreams is done");
+        }
+        const reader = value.readable.getReader({ mode: "byob" });
+        const [sourceId, recommendedBufferCount, maximumLength] =
+            await readDescription(reader);
+        if (sourceId !== constants.MESSAGES_SOURCE_ID) {
+            throw new Error(
+                `received a request for an unexpected bidirectional stream with id ${sourceId} (expected ${constants.MESSAGES_SOURCE_ID})`,
+            );
+        }
+        if (messageStream != null) {
+            throw new Error(
+                `received a request for an unexpected messages stream (already exists)`,
+            );
+        }
+        messageStream = new MessageStream(
+            sourceId,
+            sourceId,
+            recommendedBufferCount,
+            maximumLength,
+            reader,
+            value.writable,
+            (stream, buffer) => {
+                if (
+                    new Uint32Array(buffer, 0, 1)[0] === 8 &&
+                    new Uint32Array(buffer, 4, 1)[0] === 0x676e6f70 // 'pong'
+                ) {
+                    if (stream.bufferPromiseResolveReject == null) {
+                        stream.buffers.push(buffer);
+                    } else {
+                        stream.bufferPromiseResolveReject[0](buffer);
+                        stream.bufferPromiseResolveReject = null;
+                    }
+                } else {
+                    postMessage(
+                        {
+                            type: constants.TRANSPORT_TO_MAIN_BUFFER,
+                            streamId: stream.streamId,
+                            sourceId: stream.sourceId,
+                            buffer,
+                        },
+                        { transfer: [buffer] },
+                    );
+                }
+            },
+        );
+    }
+}
 
 async function connect(
     protocol: string,
@@ -150,6 +286,7 @@ async function connect(
     port: string,
     path: string,
 ) {
+    let transport: WebTransport = null;
     try {
         const response = await fetch(
             `${protocol}//${hostname}${port}${path}transport-certificate`,
@@ -182,163 +319,29 @@ async function connect(
             type: constants.TRANSPORT_TO_MAIN_CONNECTION_STATUS,
             status: "connected",
         });
-        const unidirectionalStreams = transport.incomingUnidirectionalStreams;
-        const unidirectionalStreamsReader = unidirectionalStreams.getReader();
-        const unidirectionalGeneratorStreamId = nextStreamId;
-        ++nextStreamId;
-        const bidirectionalStreams = transport.incomingBidirectionalStreams;
-        const bidirectionalStreamsReader = bidirectionalStreams.getReader();
-        const bidirectionalGeneratorStreamId = nextStreamId;
-        ++nextStreamId;
-        streamIdToPromise.set(
-            unidirectionalGeneratorStreamId,
-            unidirectionalStreamsReader
-                .read()
-                .then(stream => [unidirectionalGeneratorStreamId, stream]),
-        );
-        streamIdToPromise.set(
-            bidirectionalGeneratorStreamId,
-            bidirectionalStreamsReader
-                .read()
-                .then(stream => [bidirectionalGeneratorStreamId, stream]),
-        );
-        let descriptionBuffer = new ArrayBuffer(12);
-        while (true) {
-            const [streamId, result] = await Promise.race(
-                streamIdToPromise.values(),
-            );
-            if (
-                streamId === unidirectionalGeneratorStreamId ||
-                streamId === bidirectionalGeneratorStreamId
-            ) {
-                if (result.done) {
-                    throw new Error(`stream ${streamId} is done`);
-                }
-
-                console.log(`streamId=${streamId}`, result.value); // @DEV
-
-                const reader: ReadableStreamBYOBReader = (
-                    streamId === unidirectionalGeneratorStreamId
-                        ? result.value
-                        : result.value.readable
-                ).getReader({ mode: "byob" });
-
-                console.log(`streamId=${streamId} getReader worked`); // @DEV
-
-                let descriptionOffset = 0;
-                while (descriptionOffset < descriptionBuffer.byteLength) {
-                    const { value: view, done } = await reader.read(
-                        new Uint8Array(
-                            descriptionBuffer,
-                            descriptionOffset,
-                            descriptionBuffer.byteLength - descriptionOffset,
-                        ),
-                    );
-                    if (done) {
-                        throw new Error(
-                            `new stream from generator ${streamId} closed before sending an id`,
-                        );
-                    }
-                    descriptionBuffer = view.buffer;
-                    descriptionOffset += view.length;
-                }
-                const [sourceId, recommendedBufferCount, maximumLength] =
-                    new Uint32Array(descriptionBuffer);
-                console.log(
-                    `new stream sourceId=${sourceId} recommendedBufferCount=${recommendedBufferCount} maximumLength=${maximumLength}`,
-                ); // @DEV
-                for (const stream of idToStream.values()) {
-                    if (stream.sourceId === sourceId) {
-                        throw new Error(`duplicated stream ${sourceId}`);
-                    }
-                }
-                const stream =
-                    sourceId === unidirectionalGeneratorStreamId
-                        ? new UnidirectionalStream(
-                              nextStreamId,
-                              sourceId,
-                              recommendedBufferCount,
-                              maximumLength,
-                              reader,
-                          )
-                        : new BidirectionalStream(
-                              nextStreamId,
-                              sourceId,
-                              recommendedBufferCount,
-                              maximumLength,
-                              reader,
-                              result.value.writable,
-                          );
-                ++nextStreamId;
-                idToStream.set(stream.streamId, stream);
-                if (sourceId === constants.MESSAGES_SOURCE_ID) {
-                    messageStreamId = stream.streamId;
-                }
-                streamIdToPromise.set(stream.streamId, stream.next());
-                streamIdToPromise.set(
-                    streamId,
-                    (sourceId === unidirectionalGeneratorStreamId
-                        ? unidirectionalStreamsReader
-                        : bidirectionalStreamsReader
-                    )
-                        .read()
-                        .then(stream => [streamId, stream]),
-                );
-            } else {
-                const stream = idToStream.get(streamId);
-                if (stream == null) {
-                    console.error(
-                        `a promise returned the unknown stream id ${streamId}`,
-                    );
-                }
-                const [done, buffer]: [boolean, ArrayBuffer] = result;
-                if (done) {
-                    streamIdToPromise.delete(streamId);
-                    idToStream.delete(streamId);
-                    // @DEV communicate with the main thread to delete associated workers
-                } else {
-                    if (buffer == null) {
-                        streamIdToPromise.set(streamId, stream.next());
-                    } else {
-                        console.log(
-                            `stream.sourceId=${stream.sourceId}, stream.streamId=${stream.streamId}`,
-                        ); // @DEV
-                        postMessage(
-                            {
-                                type:
-                                    stream.sourceId ===
-                                    constants.MESSAGES_SOURCE_ID
-                                        ? constants.TRANSPORT_TO_MAIN_BUFFER
-                                        : constants.TRANSPORT_TO_DECODE_BUFFER,
-                                streamId: stream.streamId,
-                                sourceId: stream.sourceId,
-                                buffer,
-                            },
-                            { transfer: [buffer] },
-                        );
-                        streamIdToPromise.set(streamId, stream.next());
-                    }
-                }
-            }
-        }
+        await Promise.all([
+            spawnUnidirectionalStreams(
+                transport.incomingUnidirectionalStreams.getReader(),
+            ),
+            spawnBidirectionalStreams(
+                transport.incomingBidirectionalStreams.getReader(),
+            ),
+        ]);
     } catch (error) {
         console.error(error);
-        streamIdToPromise.clear();
-        idToStream.clear();
-        messageStreamId = null;
-        if (transport != null) {
-            transport.close();
-            transport = null;
-        }
-        postMessage({
-            type: constants.TRANSPORT_TO_MAIN_CONNECTION_STATUS,
-            status: "disconnected",
-        });
-        setTimeout(connect, 1000, protocol, hostname, port, path);
     }
+    for (const stream of idToStream.values()) {
+        stream.abort();
+    }
+    if (transport != null) {
+        transport.close();
+    }
+    postMessage({
+        type: constants.TRANSPORT_TO_MAIN_CONNECTION_STATUS,
+        status: "disconnected",
+    });
+    setTimeout(connect, 1000, protocol, hostname, port, path);
 }
-
-let started = false;
 
 self.addEventListener("message", ({ data }) => {
     switch (data.type) {
@@ -365,14 +368,10 @@ self.addEventListener("message", ({ data }) => {
             break;
         }
         case constants.MAIN_TO_TRANSPORT_MESSAGE: {
-            if (messageStreamId != null) {
-                const stream = idToStream.get(messageStreamId);
-                if (stream != null) {
-                    const size = new Uint32Array(data.buffer, 0, 1)[0];
-                    (stream as BidirectionalStream).writer.write(
-                        new Uint8Array(data.buffer, 0, size),
-                    );
-                }
+            if (messageStream != null) {
+                messageStream.writer.write(
+                    new Uint8Array(data.buffer, 0, data.buffer.byteLength),
+                );
             }
             break;
         }

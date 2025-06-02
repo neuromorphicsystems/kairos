@@ -1,4 +1,8 @@
+import type { EventDisplayProperties } from "./appState.svelte";
+
 import * as constants from "./constants";
+import * as utilities from "./utilities";
+import { namedColormaps } from "./colormaps";
 
 const vertexShaderSource: string = `#version 300 es
 precision highp float;
@@ -29,11 +33,11 @@ void main() {
     float t = abs(t_and_on);
     bool on = t_and_on >= 0.0f;
     float lambda = 0.0f;
-    if (t_and_on < ${constants.MAXIMUM_DELTA * 2}.0f) {
+    if (t_and_on < ${constants.MAXIMUM_F32_VALUE * 2}.0f) {
         if (style == 0) {
             lambda = exp(-float(current_t - t) / tau);
         } else if (style == 1) {
-            lambda = (current_t - t) < tau ? 1.0f - (current_t - t) / tau : 0.0f;
+            lambda = (current_t - t) < (tau * 2.0f) ? 1.0f - (current_t - t) / (tau * 2.0f) : 0.0f;
         } else {
             lambda = (current_t - t) < tau ? 1.0f : 0.0f;
         }
@@ -44,14 +48,10 @@ void main() {
 
 interface Context {
     canvas: HTMLCanvasElement;
-    configuration: {
-        onColormap: [number, number, number, number][];
-        offColormap: [number, number, number, number][];
-        colormapChanged: boolean;
-        colormapSplit: number;
-        style: number;
-        tau: number;
-    };
+    overlay: HTMLElement;
+    properties: EventDisplayProperties;
+    cachedColormapIndex: number;
+    colormapSplit: number;
     gl: WebGL2RenderingContext;
     program: WebGLProgram;
     location: {
@@ -69,41 +69,19 @@ interface Context {
     colormapTexture: WebGLTexture;
 }
 
-function hexToRgba(hex: string): [number, number, number, number] {
-    if (hex.startsWith("#")) {
-        if (hex.length === 7) {
-            return [
-                parseInt(hex.slice(1, 3), 16),
-                parseInt(hex.slice(3, 5), 16),
-                parseInt(hex.slice(5, 7), 16),
-                255,
-            ];
-        }
-        if (hex.length === 9) {
-            return [
-                parseInt(hex.slice(1, 3), 16),
-                parseInt(hex.slice(3, 5), 16),
-                parseInt(hex.slice(5, 7), 16),
-                parseInt(hex.slice(7, 9), 16),
-            ];
-        }
-    }
-    throw new Error(`parsing ${hex} as a color failed`);
-}
-
-function newContext(canvas: HTMLCanvasElement): Context {
+function newContext(
+    canvas: HTMLCanvasElement,
+    overlay: HTMLElement,
+    properties: EventDisplayProperties,
+): Context {
     return {
         canvas,
+        overlay,
+        properties,
+        cachedColormapIndex: null,
+        colormapSplit: null,
         gl: null,
         program: null,
-        configuration: {
-            onColormap: [hexToRgba("#191919"), hexToRgba("#FBBC05")],
-            offColormap: [hexToRgba("#191919"), hexToRgba("#4285F4")],
-            colormapChanged: true,
-            colormapSplit: 0,
-            style: 0,
-            tau: 500000.0,
-        },
         location: {
             vertices: null,
             tAndOnSampler: null,
@@ -125,12 +103,11 @@ function paint(
     height: number,
     context: Context,
     data: Float32Array,
-    currentT: number,
     glCurrentT: number,
+    displayT: string,
 ) {
     if (context.gl == null) {
         context.gl = context.canvas.getContext("webgl2");
-        context.gl.getExtension("OES_texture_float_linear");
         if (context.gl == null) {
             throw new Error("creating a webgl2 context failed");
         }
@@ -224,12 +201,24 @@ function paint(
         context.gl.texParameteri(
             context.gl.TEXTURE_2D,
             context.gl.TEXTURE_MIN_FILTER,
-            context.gl.LINEAR,
+            context.gl.NEAREST,
         );
         context.gl.texParameteri(
             context.gl.TEXTURE_2D,
             context.gl.TEXTURE_MAG_FILTER,
             context.gl.NEAREST,
+        );
+        context.gl.texImage2D(
+            context.gl.TEXTURE_2D,
+            0,
+            context.gl.R32F,
+            width,
+            height,
+            0,
+            context.gl.RED,
+            context.gl.FLOAT,
+            data,
+            0,
         );
         context.colormapTexture = context.gl.createTexture();
         context.gl.bindTexture(context.gl.TEXTURE_2D, context.colormapTexture);
@@ -254,49 +243,49 @@ function paint(
             context.gl.LINEAR,
         );
         context.program = program;
+
+        context.gl.bindTexture(context.gl.TEXTURE_2D, context.tsAndOnsTexture); // WTF?
+    } else {
+        context.gl.bindTexture(context.gl.TEXTURE_2D, context.tsAndOnsTexture);
+        context.gl.texSubImage2D(
+            context.gl.TEXTURE_2D,
+            0,
+            0,
+            0,
+            width,
+            height,
+            context.gl.RED,
+            context.gl.FLOAT,
+            data,
+            0,
+        );
     }
     context.gl.useProgram(context.program);
     context.gl.uniform1f(context.location.currentT, glCurrentT);
-    context.gl.uniform1i(context.location.style, context.configuration.style);
-    context.gl.uniform1f(context.location.tau, context.configuration.tau);
+    context.gl.uniform1i(context.location.style, context.properties.style);
+    context.gl.uniform1f(context.location.tau, context.properties.tau);
     context.gl.disable(context.gl.DEPTH_TEST);
-    context.gl.enable(context.gl.BLEND);
-    context.gl.blendFunc(context.gl.SRC_ALPHA, context.gl.ONE_MINUS_SRC_ALPHA);
-    context.gl.clearColor(0.2, 0.3, 0.4, 1.0);
+    context.gl.clearColor(0.0, 0.0, 0.0, 1.0);
     context.gl.clear(context.gl.COLOR_BUFFER_BIT | context.gl.DEPTH_BUFFER_BIT);
     context.gl.activeTexture(context.gl.TEXTURE0);
-    context.gl.bindTexture(context.gl.TEXTURE_2D, context.tsAndOnsTexture);
     context.gl.uniform1i(context.location.tAndOnSampler, 0);
-    context.gl.texImage2D(
-        context.gl.TEXTURE_2D,
-        0,
-        context.gl.R32F,
-        width,
-        height,
-        0,
-        context.gl.RED,
-        context.gl.FLOAT,
-        data,
-        0,
-    );
     context.gl.activeTexture(context.gl.TEXTURE1);
     context.gl.bindTexture(context.gl.TEXTURE_2D, context.colormapTexture);
     context.gl.uniform1i(context.location.colorSampler, 1);
-    if (context.configuration.colormapChanged) {
-        const colormapLength =
-            context.configuration.onColormap.length +
-            context.configuration.offColormap.length;
+    if (context.cachedColormapIndex !== context.properties.colormapIndex) {
+        const colormap = namedColormaps[context.properties.colormapIndex];
+        const colormapLength = colormap.on.length + colormap.off.length;
         const colormapData = new Uint8Array(colormapLength * 4);
-        let index = (context.configuration.offColormap.length - 1) * 4;
-        for (const [r, g, b, a] of context.configuration.offColormap) {
+        let index = (colormap.off.length - 1) * 4;
+        for (const [r, g, b, a] of colormap.off) {
             colormapData[index] = r;
             colormapData[index + 1] = g;
             colormapData[index + 2] = b;
             colormapData[index + 3] = a;
             index -= 4;
         }
-        index = context.configuration.offColormap.length * 4;
-        for (const [r, g, b, a] of context.configuration.onColormap) {
+        index = colormap.off.length * 4;
+        for (const [r, g, b, a] of colormap.on) {
             colormapData[index] = r;
             colormapData[index + 1] = g;
             colormapData[index + 2] = b;
@@ -315,32 +304,29 @@ function paint(
             colormapData,
             0,
         );
-        context.configuration.colormapSplit =
-            colormapLength === 0
-                ? 0.0
-                : context.configuration.offColormap.length / colormapLength;
-        context.configuration.colormapChanged = false;
-        console.log(context); // @DEV
+        context.colormapSplit =
+            colormapLength === 0 ? 0.0 : colormap.off.length / colormapLength;
+        context.cachedColormapIndex = context.properties.colormapIndex;
     }
-    context.gl.uniform1f(
-        context.location.colormapSplit,
-        context.configuration.colormapSplit,
-    );
+    context.gl.uniform1f(context.location.colormapSplit, context.colormapSplit);
     context.gl.bindVertexArray(context.vertexArrayObject);
     context.gl.drawArrays(context.gl.TRIANGLE_STRIP, 0, 4);
+    context.overlay.innerHTML = displayT;
 }
 
-export class Painter {
-    decodeWorker: Worker;
+class EventPainter {
+    type: "EventPainter";
+    decoder: Worker;
     width: number;
     height: number;
     nextCanvasId: number;
     contextsAndIds: [Context, number][];
-    buffersAndTimes: [ArrayBuffer, number, number][];
+    buffersAndTimes: [ArrayBuffer, number, string][];
     previousTimestamp: number;
 
-    constructor(decodeWorker: Worker, width: number, height: number) {
-        this.decodeWorker = decodeWorker;
+    constructor(decoder: Worker, width: number, height: number) {
+        this.type = "EventPainter";
+        this.decoder = decoder;
         this.width = width;
         this.height = height;
         this.nextCanvasId = 0;
@@ -363,7 +349,7 @@ export class Painter {
         }
         if (frameCount > 0) {
             for (let index = 0; index < frameCount; ++index) {
-                const [buffer, currentT, glCurrentT] =
+                const [buffer, glCurrentT, displayT] =
                     this.buffersAndTimes.shift();
                 if (index === frameCount - 1) {
                     const data = new Float32Array(
@@ -377,12 +363,12 @@ export class Painter {
                             this.height,
                             context,
                             data,
-                            currentT,
                             glCurrentT,
+                            displayT,
                         );
                     }
                 }
-                this.decodeWorker.postMessage(
+                this.decoder.postMessage(
                     {
                         buffer,
                         type: constants.PAINT_TO_DECODE_BUFFER,
@@ -397,12 +383,12 @@ export class Painter {
         });
     }
 
-    handleBuffer(data: ArrayBuffer, currentT: number, glCurrentT: number) {
-        this.buffersAndTimes.push([data, currentT, glCurrentT]);
+    handleBuffer(data: ArrayBuffer, glCurrentT: number, displayT: string) {
+        this.buffersAndTimes.push([data, glCurrentT, displayT]);
         while (this.buffersAndTimes.length > 4) {
-            const [buffer, _currentT, _glCurrentT] =
+            const [buffer, _glCurrentT, _displayT] =
                 this.buffersAndTimes.shift();
-            this.decodeWorker.postMessage(
+            this.decoder.postMessage(
                 {
                     type: constants.PAINT_TO_DECODE_BUFFER,
                     buffer,
@@ -412,7 +398,11 @@ export class Painter {
         }
     }
 
-    attachCanvas(canvas: HTMLCanvasElement): number {
+    attach(
+        canvas: HTMLCanvasElement,
+        overlay: HTMLElement,
+        properties: EventDisplayProperties,
+    ): number {
         for (const [existingContext, _] of this.contextsAndIds) {
             if (existingContext.canvas === canvas) {
                 throw new Error(`${canvas} is already attached`);
@@ -422,11 +412,21 @@ export class Painter {
         canvas.height = this.height;
         const canvasId = this.nextCanvasId;
         ++this.nextCanvasId;
-        this.contextsAndIds.push([newContext(canvas), canvasId]);
+        this.contextsAndIds.push([
+            newContext(canvas, overlay, properties),
+            canvasId,
+        ]);
+
+        console.log(
+            `${utilities.utcString()} | attached ${canvasId}, props=${JSON.stringify(properties)}`,
+        ); // @DEV
+
         return canvasId;
     }
 
-    detachCanvas(canvasId: number) {
+    detach(canvasId: number) {
+        console.log(`${utilities.utcString()} | detach ${canvasId}`); // @DEV
+
         for (let index = 0; index < this.contextsAndIds.length; ++index) {
             if (canvasId === this.contextsAndIds[index][1]) {
                 this.contextsAndIds.splice(index, 1);
@@ -436,3 +436,5 @@ export class Painter {
         throw new Error(`${canvasId} is not attached`);
     }
 }
+
+export default EventPainter;

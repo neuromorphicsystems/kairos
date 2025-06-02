@@ -17,9 +17,6 @@ impl Stack {
         for _ in 0..length {
             inner.push(Vec::new());
         }
-
-        println!("new stack with {} items", length); // @DEV
-
         Self {
             inner,
             shrunk: length,
@@ -42,15 +39,6 @@ impl Stack {
     pub fn push(&mut self, buffer: Vec<u8>) {
         self.update_samples();
         self.inner.push(buffer);
-
-        println!(
-            ">   push, length={}, shrunk={}, latest_minimum_instant={:>4} ms ago, minimum_samples{:?}, minimum_samples_index={}",
-            self.inner.len(),
-            self.shrunk,
-            self.latest_minimum_instant.elapsed().as_millis() as u64,
-            self.minimum_samples,
-            self.minimum_samples_index
-        ); // @DEV
     }
 
     pub fn pop(&mut self) -> Option<Vec<u8>> {
@@ -61,16 +49,6 @@ impl Stack {
             self.minimum_samples[self.minimum_samples_index] =
                 self.minimum_samples[self.minimum_samples_index].min(self.inner.len());
         }
-
-        println!(
-            "<    pop, length={}, shrunk={}, latest_minimum_instant={:>4} ms ago, minimum_samples{:?}, minimum_samples_index={}",
-            self.inner.len(),
-            self.shrunk,
-            self.latest_minimum_instant.elapsed().as_millis() as u64,
-            self.minimum_samples,
-            self.minimum_samples_index
-        ); // @DEV
-
         buffer
     }
 
@@ -88,14 +66,5 @@ impl Stack {
             }
             self.shrunk = running_minimum;
         }
-
-        println!(
-            "| shrink, length={}, shrunk={}, latest_minimum_instant={:>4} ms ago, minimum_samples{:?}, minimum_samples_index={}",
-            self.inner.len(),
-            self.shrunk,
-            self.latest_minimum_instant.elapsed().as_millis() as u64,
-            self.minimum_samples,
-            self.minimum_samples_index
-        ); // @DEV
     }
 }

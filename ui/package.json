@@ -3,6 +3,7 @@
     "type": "module",
     "dependencies": {
         "caniuse-lite": "1.0.30001715",
+        "chart.js": "4.4.9",
         "esbuild": "0.25.3",
         "esbuild-svelte": "0.9.2",
         "mustache": "4.2.0",

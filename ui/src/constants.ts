@@ -15,8 +15,15 @@ export const PAINT_TO_DECODE_BUFFER = 11;
 // export const RENDER_TO_DRAW = 5;
 // export const DRAW_TO_RENDER = 6;
 
-export const MAXIMUM_DELTA = 3600000000;
+export const DECODE_OUTPUT_BUFFERS_COUNT: number = 16;
+export const PING_INTERVAL: number  = 1000.0;
+export const MAXIMUM_SCALE: number  = 50.0;
+export const CLICK_MAXIMUM_DISTANCE: number  = 3.0;
+export const MAXIMUM_F32_VALUE: number = 3600000000;
 export const MESSAGES_SOURCE_ID: number = 0xffffff;
+export const CHART_AUTO_ORIENTATION_RATIO: number = 2.7;
+
+export const CHART_RANGES = [0.0, 5.0, 10.0, 30.0, 60.0];
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
