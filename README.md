@@ -17,6 +17,7 @@
 4. Open a second terminal to build the interface (CTRL-C to stop watching for changes).
 
     ```sh
+    cd ui
     npm install
     npm run watch
     ```
