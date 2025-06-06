@@ -6,6 +6,7 @@
 
     ```sh
     cargo install wasm-bindgen-cli
+    rustup target add wasm32-unknown-unknown
     ```
 
 3. Build the interface (CTRL-C to stop watching for changes).
