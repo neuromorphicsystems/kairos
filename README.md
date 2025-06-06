@@ -8,18 +8,18 @@
     cargo install wasm-bindgen-cli
     ```
 
-3. Compile and run the server (CTRL-C to stop it).
-
-    ```sh
-    cargo run --release
-    ```
-
-4. Open a second terminal to build the interface (CTRL-C to stop watching for changes).
+3. Build the interface (CTRL-C to stop watching for changes).
 
     ```sh
     cd ui
     npm install
     npm run watch
+    ```
+
+4. Open a second terminal to compile and run the server (CTRL-C to stop it).
+
+    ```sh
+    cargo run --release
     ```
 
 5. Open _./ui/build/index.html_ in a browser (the browser must support WebTransport, see https://caniuse.com/webtransport for compatibility).
