@@ -12,7 +12,7 @@
         parentWidth,
         parentHeight,
         onCancelClick,
-        properties,
+        properties = $bindable(),
     }: {
         deviceId: number;
         streamIndex: number;
@@ -24,21 +24,17 @@
 
     let wrapperWidth: number = $state(0.0);
     let wrapperHeight: number = $state(0.0);
-    let wrapperTargetX: number = $state(0.0);
-    let wrapperTargetY: number = $state(0.0);
-    let scale: number = $state(1.0);
 
     const sigma = $derived.by(() => {
         const sigma =
             (parentWidth * wrapperHeight < wrapperWidth * parentHeight
                 ? parentWidth / wrapperWidth
-                : parentHeight / wrapperHeight) * scale;
+                : parentHeight / wrapperHeight) * properties.scale;
         return isNaN(sigma) ? 1.0 : sigma;
     });
+
     const width = $derived(wrapperWidth * sigma);
     const height = $derived(wrapperHeight * sigma);
-    const offsetX = $derived(parentWidth / 2 - sigma * wrapperTargetX);
-    const offsetY = $derived(parentHeight / 2 - sigma * wrapperTargetY);
 
     const control: {
         initialValue: [number, number];
@@ -50,23 +46,44 @@
 
     let wrapper: HTMLElement;
     let canvas: HTMLCanvasElement;
-    let overlay: HTMLElement;
+    let timestampOverlay: HTMLElement;
     onMount(() => {
         const elementId = attach(
             deviceId,
             streamIndex,
             canvas,
-            overlay,
+            timestampOverlay,
             properties,
         );
+        properties.width = canvas.width;
+        properties.height = canvas.height;
         wrapperWidth = canvas.width;
         wrapperHeight = canvas.height;
-        wrapperTargetX = canvas.width / 2;
-        wrapperTargetY = canvas.height / 2;
         return () => {
             detach(deviceId, streamIndex, elementId);
         };
     });
+
+    const offsetX = $derived(
+        parentWidth / 2 - sigma * (properties.targetX * properties.width),
+    );
+    const offsetY = $derived(
+        parentHeight / 2 - sigma * (properties.targetY * properties.height),
+    );
+    const paintAreaLeft = $derived(Math.max(offsetX, 0));
+    const paintAreaTop = $derived(Math.max(offsetY, 0));
+    const paintAreaWidth = $derived(
+        Math.min(width + Math.min(offsetX, 0), parentWidth),
+    );
+    const paintAreaHeight = $derived(
+        Math.min(height + Math.min(offsetY, 0), parentHeight),
+    );
+    const reticleLinesCenters = $derived([
+        Math.round(parentHeight / 2 - 5 - 0.5),
+        Math.round(parentHeight / 2 + 5 - 0.5),
+        Math.round(parentWidth / 2 - 5 - 0.5),
+        Math.round(parentWidth / 2 + 5 - 0.5),
+    ]);
 
     function clamp(value: number, minimum: number, maximum: number): number {
         return Math.min(Math.max(value, minimum), maximum);
@@ -85,8 +102,10 @@
             if (Math.hypot(deltaX, deltaY) > constants.CLICK_MAXIMUM_DISTANCE) {
                 onCancelClick();
             }
-            wrapperTargetX = control.initialValue[0] - deltaX / sigma;
-            wrapperTargetY = control.initialValue[1] - deltaY / sigma;
+            properties.targetX =
+                (control.initialValue[0] - deltaX / sigma) / properties.width;
+            properties.targetY =
+                (control.initialValue[1] - deltaY / sigma) / properties.height;
         }
     }}
 />
@@ -100,7 +119,7 @@
         : 'move'}"
     onwheel={event => {
         event.preventDefault();
-        const previouScale = scale;
+        const previouScale = properties.scale;
         const previousSigma = sigma;
         const newScale = clamp(
             previouScale + event.deltaY * -0.01,
@@ -109,30 +128,76 @@
         );
         const newSigma = (newScale / previouScale) * previousSigma;
         const rectangle = wrapper.getBoundingClientRect();
-        scale = newScale;
-        wrapperTargetX =
-            (event.clientX - rectangle.x) *
+        properties.scale = newScale;
+        properties.targetX =
+            ((event.clientX - rectangle.x) *
                 ((newSigma - previousSigma) / (newSigma * previousSigma)) +
-            (previousSigma / newSigma) * wrapperTargetX;
-        wrapperTargetY =
-            (event.clientY - rectangle.y) *
+                (previousSigma / newSigma) *
+                    (properties.targetX * properties.width)) /
+            properties.width;
+        properties.targetY =
+            ((event.clientY - rectangle.y) *
                 ((newSigma - previousSigma) / (newSigma * previousSigma)) +
-            (previousSigma / newSigma) * wrapperTargetY;
+                (previousSigma / newSigma) *
+                    (properties.targetY * properties.height)) /
+            properties.height;
     }}
     onmousedown={event => {
         control.initialValue = [
-            $state.snapshot(wrapperTargetX),
-            $state.snapshot(wrapperTargetY),
+            $state.snapshot(properties.targetX * properties.width),
+            $state.snapshot(properties.targetY * properties.height),
         ];
         control.initialPosition = [event.clientX, event.clientY];
     }}
-    role="button"
-    tabindex={0}
+    role="none"
 >
     <canvas bind:this={canvas}></canvas>
 </div>
 
-<div bind:this={overlay} class="timestamp">00:00:00.000000</div>
+<div class="reticle" style="display: {properties.reticle ? 'block' : 'none'};">
+    <div
+        class="reticle-line"
+        style="width: {paintAreaWidth}px; height: 1px; left: {paintAreaLeft}px; top: {reticleLinesCenters[0]}px; visibility: {reticleLinesCenters[0] -
+            0.5 >=
+            paintAreaTop &&
+        reticleLinesCenters[0] + 0.5 < paintAreaTop + paintAreaHeight
+            ? 'visible'
+            : 'hidden'}"
+    ></div>
+    <div
+        class="reticle-line"
+        style="width: {paintAreaWidth}px; height: 1px; left: {paintAreaLeft}px; top: {reticleLinesCenters[1]}px; visibility: {reticleLinesCenters[1] -
+            0.5 >=
+            paintAreaTop &&
+        reticleLinesCenters[1] + 0.5 < paintAreaTop + paintAreaHeight
+            ? 'visible'
+            : 'hidden'}"
+    ></div>
+    <div
+        class="reticle-line"
+        style="width: 1px; height: {paintAreaHeight}px; left: {reticleLinesCenters[2]}px; top: {paintAreaTop}px; visibility: {reticleLinesCenters[2] -
+            0.5 >=
+            paintAreaLeft &&
+        reticleLinesCenters[2] + 0.5 < paintAreaLeft + paintAreaWidth
+            ? 'visible'
+            : 'hidden'}"
+    ></div>
+    <div
+        class="reticle-line"
+        style="width: 1px; height: {paintAreaHeight}px; left: {reticleLinesCenters[3]}px; top: {paintAreaTop}px;  visibility: {reticleLinesCenters[3] -
+            0.5 >=
+            paintAreaLeft &&
+        reticleLinesCenters[3] + 0.5 < paintAreaLeft + paintAreaWidth
+            ? 'visible'
+            : 'hidden'}"
+    ></div>
+</div>
+
+<div
+    bind:this={timestampOverlay}
+    class="timestamp"
+    style="display: {properties.timestamp ? 'block' : 'none'}"
+></div>
 
 <style>
     .event-display {
@@ -145,14 +210,31 @@
         image-rendering: pixelated;
     }
 
+    .reticle {
+        position: absolute;
+        z-index: 1;
+        pointer-events: none;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+    }
+
+    .reticle-line {
+        position: absolute;
+        background-color: var(--content-2);
+        opacity: 0.8;
+    }
+
     .timestamp {
         position: absolute;
         z-index: 1;
         font-size: 16px;
         top: 12px;
         left: 16px;
-        color: #bbbbbb;
+        color: var(--content-1);
         font-family: "Roboto Mono", monospace;
         user-select: none;
+        pointer-events: none;
     }
 </style>

@@ -8,7 +8,7 @@
         "esbuild-svelte": "0.9.2",
         "mustache": "4.2.0",
         "svelte": "5.28.2",
-        "svelte-preprocess": "6.0.3"
+        "svelte-sonner": "1.0.5"
     },
     "resolutions": {
         "caniuse-lite": "1.0.30001715"
@@ -37,7 +37,9 @@
             "project": "./tsconfig.json",
             "sourceType": "module",
             "tsconfigRootDir": ".",
-            "extraFileExtensions": [".svelte"]
+            "extraFileExtensions": [
+                ".svelte"
+            ]
         },
         "plugins": [
             "@typescript-eslint"

@@ -48,7 +48,8 @@ void main() {
 
 interface Context {
     canvas: HTMLCanvasElement;
-    overlay: HTMLElement;
+    timestampOverlay: HTMLElement;
+    previousDisplayT: string;
     properties: EventDisplayProperties;
     cachedColormapIndex: number;
     colormapSplit: number;
@@ -71,12 +72,13 @@ interface Context {
 
 function newContext(
     canvas: HTMLCanvasElement,
-    overlay: HTMLElement,
+    timestampOverlay: HTMLElement,
     properties: EventDisplayProperties,
 ): Context {
     return {
         canvas,
-        overlay,
+        timestampOverlay,
+        previousDisplayT: "",
         properties,
         cachedColormapIndex: null,
         colormapSplit: null,
@@ -311,7 +313,10 @@ function paint(
     context.gl.uniform1f(context.location.colormapSplit, context.colormapSplit);
     context.gl.bindVertexArray(context.vertexArrayObject);
     context.gl.drawArrays(context.gl.TRIANGLE_STRIP, 0, 4);
-    context.overlay.innerHTML = displayT;
+    if (displayT !== context.previousDisplayT) {
+        context.timestampOverlay.innerHTML = displayT;
+        context.previousDisplayT = displayT;
+    }
 }
 
 class EventPainter {
@@ -400,7 +405,7 @@ class EventPainter {
 
     attach(
         canvas: HTMLCanvasElement,
-        overlay: HTMLElement,
+        timestampOverlay: HTMLElement,
         properties: EventDisplayProperties,
     ): number {
         for (const [existingContext, _] of this.contextsAndIds) {
@@ -413,7 +418,7 @@ class EventPainter {
         const canvasId = this.nextCanvasId;
         ++this.nextCanvasId;
         this.contextsAndIds.push([
-            newContext(canvas, overlay, properties),
+            newContext(canvas, timestampOverlay, properties),
             canvasId,
         ]);
 

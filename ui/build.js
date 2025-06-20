@@ -5,7 +5,6 @@ import * as path from "path";
 import * as process from "node:process";
 import * as child_process from "node:child_process";
 import sveltePlugin from "esbuild-svelte";
-import { sveltePreprocess } from "svelte-preprocess";
 
 fs.mkdirSync("build", { recursive: true });
 
@@ -81,7 +80,10 @@ const context = await esbuild.context({
     plugins: [
         sveltePlugin({
             compilerOptions: { css: "injected", runes: true },
-            preprocess: sveltePreprocess(),
+            moduleCompilerOptions: {
+                warningFilter: warning =>
+                    warning.code !== "state_referenced_locally",
+            },
         }),
         {
             name: "webworker",

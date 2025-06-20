@@ -22,8 +22,23 @@ export function utcString(): string {
         .padStart(3, "0")}`;
 }
 
+export function size(bytes: number): string {
+    const gigabytes = bytes / 1e9;
+    if (gigabytes >= 100.0) {
+        return `${gigabytes.toFixed(0)} GB`;
+    }
+    if (gigabytes >= 10.0) {
+        `${gigabytes.toFixed(1)} GB`;
+    }
+    return `${gigabytes.toFixed(2)} GB`;
+}
+
 let unique = 0;
 export function nextUnique(): number {
     ++unique;
     return unique;
+}
+
+export function clamp(value: number, minimum: number, maximum: number): number {
+    return Math.min(Math.max(value, minimum), maximum);
 }

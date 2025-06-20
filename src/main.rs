@@ -20,6 +20,18 @@ fn utc_string_path_safe() -> String {
         .to_string()
 }
 
+fn data_directory_default_value() -> std::ffi::OsString {
+    match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home)
+            .join("kairos-data")
+            .into_os_string(),
+        _ => match std::env::current_dir() {
+            Ok(current_dir) => current_dir.join("kairos-data").into_os_string(),
+            _ => std::path::PathBuf::from("kairos-data").into_os_string(),
+        },
+    }
+}
+
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -34,6 +46,9 @@ struct Args {
 
     #[arg(short = 's', long, default_value_t = 1usize << 30)]
     maximum_clients_buffering_memory: usize,
+
+    #[arg(short = 'd', long, default_value = data_directory_default_value())]
+    data_directory: std::path::PathBuf,
 }
 
 #[derive(Clone)]
@@ -75,10 +90,11 @@ struct Context {
     next_client_id: client::ClientId,
     id_to_client: std::collections::HashMap<client::ClientId, client::ClientProxy>,
     shared_client_state: protocol::SharedClientState,
-    bus_number_and_address_to_device: std::collections::HashMap<(u8, u8), device::DeviceProxy>,
+    id_to_device: std::collections::HashMap<device::DeviceId, device::DeviceProxy>,
     router: std::sync::Arc<std::sync::RwLock<Router>>,
     packet_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
     sample_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
+    record_state_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
 }
 
 impl Context {
@@ -94,15 +110,15 @@ impl Context {
 
     fn update_shared_client_state_devices(&mut self) {
         let mut devices: Vec<_> = self
-            .bus_number_and_address_to_device
+            .id_to_device
             .iter()
-            .map(|((bus_number, address), device)| protocol::Device {
+            .map(|(_, device)| protocol::Device {
                 id: device.id.0,
                 name: device.inner.name().to_owned(),
                 serial: device.serial.clone(),
                 speed: device.speed.to_string(),
-                bus_number: *bus_number,
-                address: *address,
+                bus_number: device.bus_number,
+                address: device.address,
                 streams: match *device.inner {
                     neuromorphic_drivers::Device::InivationDavis346(_) => Vec::new(),
                     neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
@@ -123,6 +139,7 @@ impl Context {
                         ]
                     }
                 },
+                configuration: device.configuration.clone(),
             })
             .collect();
         std::mem::swap(&mut self.shared_client_state.devices, &mut devices);
@@ -152,10 +169,16 @@ async fn main() -> Result<(), anyhow::Error> {
         next_client_id: client::ClientId(0),
         id_to_client: std::collections::HashMap::new(),
         shared_client_state: protocol::SharedClientState {
+            data_directory: args.data_directory.to_string_lossy().to_string(),
+            disk_available_and_total_space: None,
             devices: Vec::new(),
+            errors: Vec::new(),
         },
-        bus_number_and_address_to_device: std::collections::HashMap::new(),
-        router: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        id_to_device: std::collections::HashMap::new(),
+        router: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::from([(
+            device::StreamId(constants::RECORD_STATE_STREAM_ID),
+            Vec::new(),
+        )]))),
         packet_stack: std::sync::Arc::new(std::sync::Mutex::new(stack::Stack::new(
             args.maximum_clients_buffering_memory / constants::PACKET_MAXIMUM_LENGTH as usize,
             constants::STACK_MINIMUM_TIME_WINDOW,
@@ -163,6 +186,11 @@ async fn main() -> Result<(), anyhow::Error> {
         ))),
         sample_stack: std::sync::Arc::new(std::sync::Mutex::new(stack::Stack::new(
             constants::SAMPLE_STACK_LENGTH,
+            constants::STACK_MINIMUM_TIME_WINDOW,
+            constants::STACK_MINIMUM_SAMPLES,
+        ))),
+        record_state_stack: std::sync::Arc::new(std::sync::Mutex::new(stack::Stack::new(
+            constants::RECORD_STATE_STACK_LENGTH,
             constants::STACK_MINIMUM_TIME_WINDOW,
             constants::STACK_MINIMUM_SAMPLES,
         ))),
@@ -180,9 +208,12 @@ async fn main() -> Result<(), anyhow::Error> {
                             .into_iter()
                             .filter(|device| {
                                 device.serial.is_ok()
-                                    && !context_guard
-                                        .bus_number_and_address_to_device
-                                        .contains_key(&(device.address, device.bus_number))
+                                    && context_guard.id_to_device.iter().all(
+                                        |(_, listed_device)| {
+                                            device.bus_number != listed_device.bus_number
+                                                || device.address != listed_device.address
+                                        },
+                                    )
                             })
                             .collect()
                     };
@@ -200,20 +231,20 @@ async fn main() -> Result<(), anyhow::Error> {
                                         utc_string(),
                                         next_device_id
                                     ); // @DEV
-                                    devices_and_proxies.push(device::Device::new(
-                                        device::DeviceId(next_device_id),
-                                        listed_device,
-                                        device,
-                                        flag,
-                                    ));
+                                    devices_and_proxies.push(
+                                        device::Device::create_device_and_proxies(
+                                            device::DeviceId(next_device_id),
+                                            listed_device,
+                                            device,
+                                            flag,
+                                        ),
+                                    );
                                     next_device_id = (next_device_id + 1) % 0x1000000;
                                 }
                             }
                         }
                         let mut context_guard = context.blocking_lock();
-                        for (bus_number_and_address, device, device_sampler, device_proxy) in
-                            devices_and_proxies
-                        {
+                        for (device, device_sampler, device_proxy) in devices_and_proxies {
                             {
                                 let mut router_guard = context_guard
                                     .router
@@ -237,8 +268,8 @@ async fn main() -> Result<(), anyhow::Error> {
                                 });
                             }
                             context_guard
-                                .bus_number_and_address_to_device
-                                .insert(bus_number_and_address, device_proxy);
+                                .id_to_device
+                                .insert(device_proxy.id, device_proxy);
                         }
                         context_guard.update_shared_client_state_devices();
                     }
@@ -248,13 +279,14 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
 
-    // periodically check whether the (buffer) stack can be shrunk
+    // periodically check whether the (buffer) stacks can be shrunk
     {
-        let (packet_stack, sample_stack) = {
+        let (packet_stack, sample_stack, record_state_stack) = {
             let context_guard = context.lock().await;
             (
                 context_guard.packet_stack.clone(),
                 context_guard.sample_stack.clone(),
+                context_guard.record_state_stack.clone(),
             )
         };
         tokio::spawn(async move {
@@ -267,6 +299,97 @@ async fn main() -> Result<(), anyhow::Error> {
                     .lock()
                     .expect("sample stack mutex is not poisoned")
                     .shrink_unused();
+                record_state_stack
+                    .lock()
+                    .expect("sample stack mutex is not poisoned")
+                    .shrink_unused();
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // periodically read the amount of space left on the device
+    {
+        let context = context.clone();
+        tokio::spawn(async move {
+            let mut disks = sysinfo::Disks::new();
+            let mut disk_available_and_total_space: Option<(u64, u64)> = None;
+            loop {
+                let (data_directory, previous_disk_available_and_total_space) = {
+                    let context_guard = context.lock().await;
+                    (
+                        std::path::PathBuf::from(&context_guard.shared_client_state.data_directory),
+                        context_guard
+                            .shared_client_state
+                            .disk_available_and_total_space
+                            .clone(),
+                    )
+                };
+                disks.refresh_specifics(true, sysinfo::DiskRefreshKind::nothing().with_storage());
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    #[cfg(target_os = "linux")]
+                    use std::os::linux::fs::MetadataExt;
+                    #[cfg(target_os = "macos")]
+                    use std::os::macos::fs::MetadataExt;
+                    if let Ok(metadata) = std::fs::metadata(&data_directory) {
+                        let data_directory_device_id = metadata.st_dev();
+                        let mut found = false;
+                        for disk in disks.list() {
+                            if let Ok(disk_device_id) = std::fs::metadata(disk.mount_point()) {
+                                if disk_device_id.st_dev() == data_directory_device_id {
+                                    disk_available_and_total_space
+                                        .replace((disk.available_space(), disk.total_space()));
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !found {
+                            disk_available_and_total_space.take();
+                        }
+                    } else {
+                        disk_available_and_total_space.take();
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let mut found = false;
+                    for disk in disks.list() {
+                        if data_directory.starts_with(disk.mount_point()) {
+                            disk_available_and_total_space
+                                .replace((disk.available_space(), disk.total_space()));
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        disk_available_and_total_space.take();
+                    }
+                }
+                #[cfg(all(
+                    not(target_os = "linux"),
+                    not(target_os = "macos"),
+                    not(target_os = "windows")
+                ))]
+                {
+                    let mut available_space = 0;
+                    let mut total_space = 0;
+                    for disk in disks.list() {
+                        available_space += disk.available_space();
+                        total_space += disk.total_space();
+                    }
+                    disk_available_and_total_space.replace((available_space, total_space));
+                }
+                if disk_available_and_total_space != previous_disk_available_and_total_space {
+                    let mut context_guard = context.lock().await;
+                    context_guard
+                        .shared_client_state
+                        .disk_available_and_total_space = disk_available_and_total_space;
+                    if let Err(error) = context_guard.broadcast_shared_client_state() {
+                        println!("broadcast_shared_client_state error: {error:?}");
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         });

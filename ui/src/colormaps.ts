@@ -20,6 +20,10 @@ export function hexToRgba(hex: string): [number, number, number, number] {
     throw new Error(`parsing ${hex} as a color failed`);
 }
 
+export function rgbaToHex(rgba: [number, number, number, number]): string {
+    return `#${rgba.map(component => component.toString(16).padStart(2, "0")).join("")}`;
+}
+
 export const STARRY_NIGHT: [number, number, number, number][] = [
     [0, 130, 169, 255],
     [0, 129, 169, 255],

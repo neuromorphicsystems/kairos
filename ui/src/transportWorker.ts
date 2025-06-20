@@ -32,7 +32,10 @@ function unidirectionalStreamOnBuffer(
 ) {
     postMessage(
         {
-            type: constants.TRANSPORT_TO_DECODE_BUFFER,
+            type:
+                stream.sourceId === constants.RECORD_STATE_SOURCE_ID
+                    ? constants.TRANSPORT_TO_MAIN_RECORD_STATE_BUFFER
+                    : constants.TRANSPORT_TO_DECODE_BUFFER,
             streamId: stream.streamId,
             sourceId: stream.sourceId,
             buffer,
@@ -61,6 +64,8 @@ class UnidirectionalStream {
         reader: ReadableStreamBYOBReader,
         onBuffer: (stream: UnidirectionalStream, buffer: ArrayBuffer) => void,
     ) {
+        console.log(`create stream with id ${streamId} (source ${sourceId})`); // @DEV
+
         this.streamId = streamId;
         this.sourceId = sourceId;
         this.buffers = new Array(bufferCount)
@@ -156,15 +161,20 @@ class MessageStream extends UnidirectionalStream {
     pingMessage: Uint8Array;
 
     constructor(
-        streamId: number,
-        sourceId: number,
         bufferCount: number,
         bufferSize: number,
         reader: ReadableStreamBYOBReader,
         sender: WritableStream,
         onBuffer: (stream: MessageStream, buffer: ArrayBuffer) => void,
     ) {
-        super(streamId, sourceId, bufferCount, bufferSize, reader, onBuffer);
+        super(
+            constants.MESSAGE_SOURCE_ID,
+            constants.MESSAGE_SOURCE_ID,
+            bufferCount,
+            bufferSize,
+            reader,
+            onBuffer,
+        );
         this.writer = sender.getWriter();
         const encoder = new TextEncoder();
         const buffer = encoder.encode(JSON.stringify({ type: "Ping" }));
@@ -210,18 +220,32 @@ async function spawnUnidirectionalStreams(
         const reader = value.getReader({ mode: "byob" });
         const [sourceId, recommendedBufferCount, maximumLength] =
             await readDescription(reader);
-        idToStream.set(
-            nextStreamId,
-            new UnidirectionalStream(
+        if (sourceId === constants.RECORD_STATE_SOURCE_ID) {
+            idToStream.set(
+                constants.RECORD_STATE_SOURCE_ID,
+                new UnidirectionalStream(
+                    constants.RECORD_STATE_SOURCE_ID,
+                    constants.RECORD_STATE_SOURCE_ID,
+                    recommendedBufferCount,
+                    maximumLength,
+                    reader,
+                    unidirectionalStreamOnBuffer,
+                ),
+            );
+        } else {
+            idToStream.set(
                 nextStreamId,
-                sourceId,
-                recommendedBufferCount,
-                maximumLength,
-                reader,
-                unidirectionalStreamOnBuffer,
-            ),
-        );
-        ++nextStreamId;
+                new UnidirectionalStream(
+                    nextStreamId,
+                    sourceId,
+                    recommendedBufferCount,
+                    maximumLength,
+                    reader,
+                    unidirectionalStreamOnBuffer,
+                ),
+            );
+            ++nextStreamId;
+        }
     }
 }
 
@@ -236,9 +260,9 @@ async function spawnBidirectionalStreams(
         const reader = value.readable.getReader({ mode: "byob" });
         const [sourceId, recommendedBufferCount, maximumLength] =
             await readDescription(reader);
-        if (sourceId !== constants.MESSAGES_SOURCE_ID) {
+        if (sourceId !== constants.MESSAGE_SOURCE_ID) {
             throw new Error(
-                `received a request for an unexpected bidirectional stream with id ${sourceId} (expected ${constants.MESSAGES_SOURCE_ID})`,
+                `received a request for an unexpected bidirectional stream with id ${sourceId} (expected ${constants.MESSAGE_SOURCE_ID})`,
             );
         }
         if (messageStream != null) {
@@ -247,8 +271,6 @@ async function spawnBidirectionalStreams(
             );
         }
         messageStream = new MessageStream(
-            sourceId,
-            sourceId,
             recommendedBufferCount,
             maximumLength,
             reader,
@@ -267,7 +289,7 @@ async function spawnBidirectionalStreams(
                 } else {
                     postMessage(
                         {
-                            type: constants.TRANSPORT_TO_MAIN_BUFFER,
+                            type: constants.TRANSPORT_TO_MAIN_MESSAGE_BUFFER,
                             streamId: stream.streamId,
                             sourceId: stream.sourceId,
                             buffer,
@@ -277,6 +299,7 @@ async function spawnBidirectionalStreams(
                 }
             },
         );
+        idToStream.set(constants.MESSAGE_SOURCE_ID, messageStream);
     }
 }
 

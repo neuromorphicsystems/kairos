@@ -34,8 +34,7 @@
     bind:clientHeight={height}
     class="container {activeId === id ? 'active' : ''}"
     style="flex-grow: {size}"
-    role="button"
-    tabindex={id}
+    role="none"
     onmousedown={() => {
         holdingMouseButton = true;
     }}
@@ -60,7 +59,7 @@
                 onCancelClick={() => {
                     holdingMouseButton = false;
                 }}
-                properties={display.properties}
+                bind:properties={display.properties}
             ></EventDisplay>
         {:else if display.properties.type === "SampleDisplayProperties"}
             <SampleDisplay

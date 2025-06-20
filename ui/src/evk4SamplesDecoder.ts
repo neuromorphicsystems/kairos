@@ -41,12 +41,7 @@ class Evk4SamplesDecoder {
             const offEventRate = view.getFloat32(20, true);
             const risingTriggerCount = view.getUint32(24, true);
             const fallingTriggerCount = view.getUint32(28, true);
-            let illuminance = view.getUint32(32, true);
-            if (illuminance < 1 << 28) {
-                illuminance = (1 << 28) - illuminance;
-            } else {
-                illuminance = 0;
-            }
+            const illuminance = view.getFloat32(32, true);
             const temperature = view.getFloat32(36, true);
             const date = new Date(Number(systemTime / 1000n));
             const secondsDeciseconds = `${date.getUTCSeconds().toString().padStart(2, "0")}.${Math.floor(date.getUTCMilliseconds() / 100).toFixed(0)}`;

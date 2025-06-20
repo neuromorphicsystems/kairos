@@ -142,15 +142,15 @@
     }
 
     button:hover {
-        background-color: #666666;
+        background-color: var(--button-background-hover);
     }
 
     button.active {
-        background-color: #555555;
+        background-color: var(--button-background);
     }
 
     button.active:hover {
-        background-color: #666666;
+        background-color: var(--button-background-hover);
     }
 
     .icon {
@@ -159,15 +159,15 @@
     }
 
     .icon svg path {
-        fill: #cccccc;
+        fill: var(--content-2);
     }
 
     button:hover .icon svg path {
-        fill: #dddddd;
+        fill: var(--content-3);
     }
 
     .label {
-        color: #cccccc;
+        color: var(--content-2);
         font-size: 14px;
         height: 26px;
         line-height: 26px;
@@ -176,10 +176,10 @@
     }
 
     button:hover .label {
-        color: #dddddd;
+        color: var(--content-3);
     }
 
     .connection-label {
-        color: #dddddd;
+        color: var(--content-3);
     }
 </style>

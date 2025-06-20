@@ -2,6 +2,9 @@ import type {
     EventDisplayProperties,
     SampleDisplayProperties,
 } from "./appState.svelte";
+import type { Configuration } from "./deviceConfiguration";
+
+import { toast } from "svelte-sonner";
 
 import * as constants from "./constants";
 import * as utilities from "./utilities";
@@ -34,7 +37,7 @@ transportWorker.addEventListener("message", ({ data }) => {
             appState.local.connectionStatus = data.status;
             break;
         }
-        case constants.TRANSPORT_TO_MAIN_BUFFER: {
+        case constants.TRANSPORT_TO_MAIN_MESSAGE_BUFFER: {
             const size = new Uint32Array(data.buffer, 0, 1)[0];
             const message = JSON.parse(
                 decoder.decode(new Uint8Array(data.buffer, 4, size - 4)),
@@ -49,7 +52,29 @@ transportWorker.addEventListener("message", ({ data }) => {
                     transfer: [data.buffer],
                 },
             );
+
             appState.shared = message;
+            for (
+                let index = appState.local.nextErrorIndex;
+                index < appState.shared.errors.length;
+                ++index
+            ) {
+                toast.error(appState.shared.errors[index], {
+                    duration: Number.POSITIVE_INFINITY,
+                });
+            }
+            appState.local.nextErrorIndex = appState.shared.errors.length;
+
+            console.log($state.snapshot(appState.shared)); // @DEV
+
+            if (appState.shared.devices.length === 0) {
+                appState.local.deviceIndex = null;
+            } else if (
+                appState.local.deviceIndex == null ||
+                appState.local.deviceIndex >= appState.shared.devices.length
+            ) {
+                appState.local.deviceIndex = 0;
+            }
             for (const display of appState.local.displays) {
                 if (display != null) {
                     if (display.target != null) {
@@ -112,6 +137,26 @@ transportWorker.addEventListener("message", ({ data }) => {
                     }
                 }
             }
+            break;
+        }
+        case constants.TRANSPORT_TO_MAIN_RECORD_STATE_BUFFER: {
+            const size = new Uint32Array(data.buffer, 0, 1)[0];
+            console.log(
+                "received record state",
+                new Uint8Array(data.buffer, 4, size - 4),
+            ); // @DEV
+            // @DEV parse message here
+            transportWorker.postMessage(
+                {
+                    type: constants.MAIN_TO_TRANSPORT_BUFFER,
+                    streamId: data.streamId,
+                    buffer: data.buffer,
+                },
+                {
+                    transfer: [data.buffer],
+                },
+            );
+            // @DEV update appState.deviceIdToRecordState
             break;
         }
         case constants.TRANSPORT_TO_DECODE_BUFFER: {
@@ -231,7 +276,7 @@ function startStream(
                     });
                     sendMessageToServer({
                         type: "StartStream",
-                        id: sourceId,
+                        stream_id: sourceId,
                     });
                     break;
                 }
@@ -270,6 +315,7 @@ function startStream(
             {
                 name: "Event rate",
                 yLabel: "Event rate (Hz)",
+                units: "Hz",
                 logarithmic: true,
                 curvesNamesAndColors: [
                     ["Total", "#5C538B"],
@@ -279,19 +325,22 @@ function startStream(
             },
             {
                 name: "Illuminance",
-                yLabel: "Illuminance",
+                yLabel: "Illuminance (lx)",
+                units: "lx",
                 logarithmic: false,
                 curvesNamesAndColors: [["Illuminance", "#C3A34B"]],
             },
             {
                 name: "Temperature",
                 yLabel: "Temperature (ºC)",
+                units: "ºC",
                 logarithmic: false,
                 curvesNamesAndColors: [["Temperature", "#874037"]],
             },
             {
                 name: "External events",
                 yLabel: "External events",
+                units: null,
                 logarithmic: false,
                 curvesNamesAndColors: [
                     ["Rising", "#B4DEC6"],
@@ -328,6 +377,32 @@ function startStream(
 
 export function stopStream(deviceId: number, streamIndex: number) {
     // @DEV this should be a special constants.MAIN_TO... message
+}
+
+export function startRecording(deviceId: number, name: string) {
+    sendMessageToServer({
+        type: "StartRecording",
+        device_id: deviceId,
+        name,
+    });
+}
+
+export function stopRecording(deviceId: number) {
+    sendMessageToServer({
+        type: "StopRecording",
+        device_id: deviceId,
+    });
+}
+
+export function updateConfiguration(
+    deviceId: number,
+    configuration: Configuration,
+) {
+    sendMessageToServer({
+        type: "UpdateConfiguration",
+        device_id: deviceId,
+        configuration,
+    });
 }
 
 export function attach(

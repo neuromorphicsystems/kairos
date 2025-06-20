@@ -2,6 +2,7 @@
     import type { ContainerId, Layout } from "./constants";
 
     import appState from "./appState.svelte";
+    import PopoverMask from "./popoverMask.svelte";
 
     let {
         open = $bindable(),
@@ -119,349 +120,250 @@
                 throw new Error(`unsupported layout ${layout}`);
             }
         }
+        open = false;
     }
 </script>
 
-<div
-    class="layout-popover {open ? '' : 'hidden'}"
-    role="button"
-    tabindex="0"
-    onclick={() => {
-        open = false;
-    }}
-    onkeydown={() => {}}
->
-    <div class="content {open ? '' : 'hidden'}">
-        <button
-            aria-label="Layout h"
-            class={appState.local.layout === "h" ? "active" : ""}
-            onclick={() => {
-                updateLayout("h");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="106"
-                            height="36"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="106"
-                            height="36"
-                            x="12"
-                            y="52"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout hv2"
-            class={appState.local.layout === "hv2" ? "active" : ""}
-            onclick={() => {
-                updateLayout("hv2");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="106"
-                            height="36"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="12"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="67"
-                            y="52"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout hv1"
-            class={appState.local.layout === "hv1" ? "active" : ""}
-            onclick={() => {
-                updateLayout("hv1");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="106"
-                            height="36"
-                            x="12"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="67"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout v"
-            class={appState.local.layout === "v" ? "active" : ""}
-            onclick={() => {
-                updateLayout("v");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="51"
-                            height="76"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="76"
-                            x="67"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout vh2"
-            class={appState.local.layout === "vh2" ? "active" : ""}
-            onclick={() => {
-                updateLayout("vh2");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="51"
-                            height="76"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="67"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="67"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout vh1"
-            class={appState.local.layout === "vh1" ? "active" : ""}
-            onclick={() => {
-                updateLayout("vh1");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="51"
-                            height="76"
-                            x="67"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="12"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="36"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout full"
-            class={appState.local.layout === "full" ? "active" : ""}
-            onclick={() => {
-                updateLayout("full");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><rect
+<PopoverMask bind:open></PopoverMask>
+
+<div class="content {open ? '' : 'hidden'}">
+    <button
+        aria-label="Layout h"
+        class={appState.local.layout === "h" ? "active" : ""}
+        onclick={() => {
+            updateLayout("h");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="106" height="36" x="12" y="12" rx="8" /><rect
                         width="106"
-                        height="76"
+                        height="36"
+                        x="12"
+                        y="52"
+                        rx="8"
+                    /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout hv2"
+        class={appState.local.layout === "hv2" ? "active" : ""}
+        onclick={() => {
+            updateLayout("hv2");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="106" height="36" x="12" y="12" rx="8" /><rect
+                        width="51"
+                        height="36"
+                        x="12"
+                        y="52"
+                        rx="8"
+                    /><rect width="51" height="36" x="67" y="52" rx="8" /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout hv1"
+        class={appState.local.layout === "hv1" ? "active" : ""}
+        onclick={() => {
+            updateLayout("hv1");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="106" height="36" x="12" y="52" rx="8" /><rect
+                        width="51"
+                        height="36"
                         x="12"
                         y="12"
-                        fill-rule="evenodd"
                         rx="8"
-                    /></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout hv1v2"
-            class={appState.local.layout === "hv1v2" ? "active" : ""}
-            onclick={() => {
-                updateLayout("hv1v2");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="66"
-                            height="36"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="36"
-                            height="36"
-                            x="12"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="66"
-                            height="36"
-                            x="52"
-                            y="52"
-                            rx="8"
-                        /><rect
-                            width="36"
-                            height="36"
-                            x="82"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-        <button
-            aria-label="Layout vh1h2"
-            class={appState.local.layout === "vh1h2" ? "active" : ""}
-            onclick={() => {
-                updateLayout("vh1h2");
-            }}
-        >
-            <div class="icon">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
-                    ><g fill="none" fill-rule="evenodd"
-                        ><rect
-                            width="51"
-                            height="52"
-                            x="12"
-                            y="12"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="20"
-                            x="12"
-                            y="68"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="52"
-                            x="67"
-                            y="36"
-                            rx="8"
-                        /><rect
-                            width="51"
-                            height="20"
-                            x="67"
-                            y="12"
-                            rx="8"
-                        /></g
-                    ></svg
-                >
-            </div>
-        </button>
-
-        <div class="arrow">
-            <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="50"
-                height="17"
-                viewBox="0 0 50 17"
-                ><path
-                    fill="#333333"
+                    /><rect width="51" height="36" x="67" y="12" rx="8" /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout v"
+        class={appState.local.layout === "v" ? "active" : ""}
+        onclick={() => {
+            updateLayout("v");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="51" height="76" x="12" y="12" rx="8" /><rect
+                        width="51"
+                        height="76"
+                        x="67"
+                        y="12"
+                        rx="8"
+                    /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout vh2"
+        class={appState.local.layout === "vh2" ? "active" : ""}
+        onclick={() => {
+            updateLayout("vh2");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="51" height="76" x="12" y="12" rx="8" /><rect
+                        width="51"
+                        height="36"
+                        x="67"
+                        y="52"
+                        rx="8"
+                    /><rect width="51" height="36" x="67" y="12" rx="8" /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout vh1"
+        class={appState.local.layout === "vh1" ? "active" : ""}
+        onclick={() => {
+            updateLayout("vh1");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="51" height="76" x="67" y="12" rx="8" /><rect
+                        width="51"
+                        height="36"
+                        x="12"
+                        y="52"
+                        rx="8"
+                    /><rect width="51" height="36" x="12" y="12" rx="8" /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout full"
+        class={appState.local.layout === "full" ? "active" : ""}
+        onclick={() => {
+            updateLayout("full");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><rect
+                    width="106"
+                    height="76"
+                    x="12"
+                    y="12"
                     fill-rule="evenodd"
-                    stroke="#555555"
-                    d="M-35,17 L-35,14.5 L9.58334938,14.5 C11.1339256,14.5 12.6242951,13.8997163 13.7420017,12.8249984 L23.6137826,3.33290138 C24.3880055,2.58845622 25.6119945,2.58845622 26.3862174,3.33290138 L36.2579983,12.8249984 C37.3757049,13.8997163 38.8660744,14.5 40.4166506,14.5 L80,14.5 L80,14.5 L80,17"
+                    rx="8"
                 /></svg
             >
         </div>
+    </button>
+    <button
+        aria-label="Layout hv1v2"
+        class={appState.local.layout === "hv1v2" ? "active" : ""}
+        onclick={() => {
+            updateLayout("hv1v2");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="66" height="36" x="12" y="12" rx="8" /><rect
+                        width="36"
+                        height="36"
+                        x="12"
+                        y="52"
+                        rx="8"
+                    /><rect width="66" height="36" x="52" y="52" rx="8" /><rect
+                        width="36"
+                        height="36"
+                        x="82"
+                        y="12"
+                        rx="8"
+                    /></g
+                ></svg
+            >
+        </div>
+    </button>
+    <button
+        aria-label="Layout vh1h2"
+        class={appState.local.layout === "vh1h2" ? "active" : ""}
+        onclick={() => {
+            updateLayout("vh1h2");
+        }}
+    >
+        <div class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 100"
+                ><g fill="none" fill-rule="evenodd"
+                    ><rect width="51" height="52" x="12" y="12" rx="8" /><rect
+                        width="51"
+                        height="20"
+                        x="12"
+                        y="68"
+                        rx="8"
+                    /><rect width="51" height="52" x="67" y="36" rx="8" /><rect
+                        width="51"
+                        height="20"
+                        x="67"
+                        y="12"
+                        rx="8"
+                    /></g
+                ></svg
+            >
+        </div>
+    </button>
+
+    <div class="arrow">
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="50"
+            height="17"
+            viewBox="0 0 50 17"
+            ><path
+                fill="#333333"
+                fill-rule="evenodd"
+                stroke="#555555"
+                d="M-35,17 L-35,14.5 L9.58334938,14.5 C11.1339256,14.5 12.6242951,13.8997163 13.7420017,12.8249984 L23.6137826,3.33290138 C24.3880055,2.58845622 25.6119945,2.58845622 26.3862174,3.33290138 L36.2579983,12.8249984 C37.3757049,13.8997163 38.8660744,14.5 40.4166506,14.5 L80,14.5 L80,14.5 L80,17"
+            /></svg
+        >
     </div>
 </div>
 
 <style>
-    .layout-popover {
-        position: absolute;
-        top: var(--status-bar-height);
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 10;
-    }
-
-    .hidden {
+    .content.hidden {
         display: none;
     }
 
     .content {
         position: absolute;
-        top: 6px;
+        top: calc(6px + var(--status-bar-height));
         left: calc(var(--device-pane-width) + 29px - 100px);
         width: 222px;
         height: 186px;
-        background-color: #333333;
-        border: 1px solid #555555;
+        background-color: var(--background-3);
+        border: 1px solid var(--border);
         border-radius: 8px;
         z-index: 11;
         display: flex;
         flex-wrap: wrap;
         padding: 10px;
         gap: 10px;
+        box-shadow: 0 0 8px 0 #00000080;
     }
 
     button {
@@ -475,20 +377,20 @@
         align-items: center;
         padding: 4px;
         border-radius: 6px;
-        background-color: #333333;
+        background-color: var(--background-3);
         cursor: pointer;
     }
 
     button:hover {
-        background-color: #666666;
+        background-color: var(--button-background-hover);
     }
 
     button.active {
-        background-color: #555555;
+        background-color: var(--button-background);
     }
 
     button.active:hover {
-        background-color: #666666;
+        background-color: var(--button-background-hover);
     }
 
     button .icon {
@@ -497,11 +399,11 @@
     }
 
     button .icon svg rect {
-        fill: #cccccc;
+        fill: var(--content-2);
     }
 
     button:hover .icon svg rect {
-        fill: #dddddd;
+        fill: var(--content-3);
     }
 
     .arrow {

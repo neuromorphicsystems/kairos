@@ -1,4 +1,5 @@
 import type { Layout } from "./constants";
+import type { Configuration } from "./deviceConfiguration";
 
 import * as utilities from "./utilities";
 import * as constants from "./constants";
@@ -15,13 +16,22 @@ interface Evk4SamplesStream {
 
 export type Stream = Evt3Stream | Evk4SamplesStream;
 
+interface Device {
+    id: number;
+    name: string;
+    serial: string;
+    speed: string;
+    bus_number: number;
+    address: number;
+    streams: Stream[];
+    configuration: Configuration;
+}
+
 interface SharedState {
-    devices: {
-        id: number;
-        name: string;
-        serial: string;
-        streams: Stream[];
-    }[];
+    data_directory: string;
+    disk_available_and_total_space: [number, number] | null;
+    devices: Device[];
+    errors: string[];
 }
 
 export interface EventDisplayProperties {
@@ -29,6 +39,13 @@ export interface EventDisplayProperties {
     colormapIndex: number;
     style: number;
     tau: number;
+    timestamp: boolean;
+    reticle: boolean;
+    width: number;
+    height: number;
+    targetX: number;
+    targetY: number;
+    scale: number;
 }
 
 export function defaultEventDisplayProperties(): EventDisplayProperties {
@@ -36,7 +53,14 @@ export function defaultEventDisplayProperties(): EventDisplayProperties {
         type: "EventDisplayProperties",
         colormapIndex: 0,
         style: 0,
-        tau: 500000.0,
+        tau: 200000.0,
+        timestamp: false,
+        reticle: false,
+        width: 1280,
+        height: 720,
+        targetX: 0.5,
+        targetY: 0.5,
+        scale: 1,
     };
 }
 
@@ -56,8 +80,8 @@ export function defaultNamesAndRanges(stream: Stream): [string, number][] {
             return [
                 ["Event rate", 3],
                 ["Illuminance", 3],
-                ["Temperature", 3],
-                ["External events", 3],
+                ["Temperature", 0],
+                ["External events", 0],
             ];
         }
         default:
@@ -89,21 +113,30 @@ interface Display {
 interface LocalState {
     connectionStatus: constants.ConnectionStatus;
     layout: Layout;
+    deviceIndex: number | null;
     displays: [Display, Display, Display, Display];
+    nextErrorIndex: number;
 }
+
+interface RecordState {}
 
 interface AppState {
     shared: SharedState;
     local: LocalState;
+    deviceIdToRecordState: { [key: number]: RecordState };
 }
 
 const appState: AppState = $state({
     shared: {
+        data_directory: "",
+        disk_available_and_total_space: null,
         devices: [],
+        errors: [],
     },
     local: {
         connectionStatus: "connecting",
         layout: "h",
+        deviceIndex: null,
         displays: [
             {
                 target: null,
@@ -116,7 +149,9 @@ const appState: AppState = $state({
             null,
             null,
         ],
+        nextErrorIndex: 0,
     },
+    deviceIdToRecordState: {},
 });
 
 export default appState;
