@@ -1,14 +1,19 @@
 <script lang="ts">
     let {
         open = $bindable(),
+        onClose,
     }: {
         open: boolean;
+        onClose?: () => void;
     } = $props();
 </script>
 
 <div
     class="mask {open ? '' : 'hidden'}"
     onclick={() => {
+        if (onClose) {
+            onClose();
+        }
         open = false;
     }}
     role="none"

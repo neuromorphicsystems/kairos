@@ -2,22 +2,24 @@ mod client;
 mod constants;
 mod device;
 mod protocol;
+mod recordings;
 mod stack;
 
 use clap::Parser;
 
-fn utc_string() -> String {
+fn now_utc_string() -> String {
     chrono::Local::now()
         .naive_utc()
         .format("%F %T%.3f")
         .to_string()
 }
 
-fn utc_string_path_safe() -> String {
-    chrono::Local::now()
-        .naive_utc()
-        .format("%FT%H-%M-%S%.6fZ")
-        .to_string()
+fn utc_string(datetime: &chrono::DateTime<chrono::Local>) -> String {
+    datetime.naive_utc().format("%FT%T%.6fZ").to_string()
+}
+
+fn utc_string_path_safe(datetime: &chrono::DateTime<chrono::Local>) -> String {
+    datetime.naive_utc().format("%FT%H-%M-%S%.6fZ").to_string()
 }
 
 fn data_directory_default_value() -> std::ffi::OsString {
@@ -90,6 +92,7 @@ struct Context {
     next_client_id: client::ClientId,
     id_to_client: std::collections::HashMap<client::ClientId, client::ClientProxy>,
     shared_client_state: protocol::SharedClientState,
+    recordings: Vec<protocol::Recording>,
     id_to_device: std::collections::HashMap<device::DeviceId, device::DeviceProxy>,
     router: std::sync::Arc<std::sync::RwLock<Router>>,
     packet_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
@@ -99,7 +102,19 @@ struct Context {
 
 impl Context {
     fn broadcast_shared_client_state(&mut self) -> Result<(), anyhow::Error> {
-        let bytes = self.shared_client_state.to_bytes()?;
+        let bytes =
+            protocol::ServerMessage::SharedClientState(&self.shared_client_state).to_bytes()?;
+        // we use a list of 'mpsc' channels instead of a single 'broadcast' channel
+        // to avoid stalls
+        for (_, client) in self.id_to_client.iter_mut() {
+            let _ = client.shared_client_state_sender.send(bytes.clone());
+        }
+        Ok(())
+    }
+
+    fn broadcast_recordings(&mut self) -> Result<(), anyhow::Error> {
+        let bytes =
+            protocol::ServerMessage::Recordings(&self.recordings).to_bytes()?;
         // we use a list of 'mpsc' channels instead of a single 'broadcast' channel
         // to avoid stalls
         for (_, client) in self.id_to_client.iter_mut() {
@@ -112,34 +127,43 @@ impl Context {
         let mut devices: Vec<_> = self
             .id_to_device
             .iter()
-            .map(|(_, device)| protocol::Device {
-                id: device.id.0,
-                name: device.inner.name().to_owned(),
-                serial: device.serial.clone(),
-                speed: device.speed.to_string(),
-                bus_number: device.bus_number,
-                address: device.address,
-                streams: match *device.inner {
-                    neuromorphic_drivers::Device::InivationDavis346(_) => Vec::new(),
-                    neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
-                        use neuromorphic_drivers::devices::prophesee_evk3_hd;
-                        vec![protocol::Stream::Evt3 {
-                            width: prophesee_evk3_hd::PROPERTIES.width,
-                            height: prophesee_evk3_hd::PROPERTIES.height,
-                        }]
-                    }
-                    neuromorphic_drivers::Device::PropheseeEvk4(_) => {
-                        use neuromorphic_drivers::devices::prophesee_evk4;
-                        vec![
-                            protocol::Stream::Evt3 {
-                                width: prophesee_evk4::PROPERTIES.width,
-                                height: prophesee_evk4::PROPERTIES.height,
-                            },
-                            protocol::Stream::Evk4Samples,
-                        ]
-                    }
-                },
-                configuration: device.configuration.clone(),
+            .map(|(_, device)| {
+                let record_configuration_guard = device
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                protocol::Device {
+                    id: device.id.0,
+                    name: device.properties.name.to_owned(),
+                    serial: device.properties.serial.clone(),
+                    speed: device.properties.speed.to_string(),
+                    bus_number: device.properties.bus_number,
+                    address: device.properties.address,
+                    streams: match *device.inner {
+                        neuromorphic_drivers::Device::InivationDavis346(_) => Vec::new(),
+                        neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
+                            use neuromorphic_drivers::devices::prophesee_evk3_hd;
+                            vec![protocol::Stream::Evt3 {
+                                width: prophesee_evk3_hd::PROPERTIES.width,
+                                height: prophesee_evk3_hd::PROPERTIES.height,
+                            }]
+                        }
+                        neuromorphic_drivers::Device::PropheseeEvk4(_) => {
+                            use neuromorphic_drivers::devices::prophesee_evk4;
+                            vec![
+                                protocol::Stream::Evt3 {
+                                    width: prophesee_evk4::PROPERTIES.width,
+                                    height: prophesee_evk4::PROPERTIES.height,
+                                },
+                                protocol::Stream::Evk4Samples,
+                            ]
+                        }
+                    },
+                    configuration: device.inner.current_configuration(),
+                    lookback: record_configuration_guard.lookback,
+                    autostop: record_configuration_guard.autostop,
+                    autotrigger: record_configuration_guard.autotrigger,
+                }
             })
             .collect();
         std::mem::swap(&mut self.shared_client_state.devices, &mut devices);
@@ -155,12 +179,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
     println!(
         "{} | Listening for HTTP requests on port {}",
-        utc_string(),
+        now_utc_string(),
         args.http_port
     );
     let tcp_listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), args.http_port))
             .await?;
+    let (recordings, recordings_errors) = recordings::initialize(&args.data_directory);
     let context = std::sync::Arc::new(tokio::sync::Mutex::new(Context {
         time_reference,
         host_to_endpoint: std::collections::HashMap::new(),
@@ -172,8 +197,18 @@ async fn main() -> Result<(), anyhow::Error> {
             data_directory: args.data_directory.to_string_lossy().to_string(),
             disk_available_and_total_space: None,
             devices: Vec::new(),
-            errors: Vec::new(),
+            errors: recordings_errors
+                .into_iter()
+                .map(|error| {
+                    format!(
+                        "Loading past recordings from {} raised an error: {}",
+                        args.data_directory.to_string_lossy(),
+                        error
+                    )
+                })
+                .collect(),
         },
+        recordings,
         id_to_device: std::collections::HashMap::new(),
         router: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::from([(
             device::StreamId(constants::RECORD_STATE_STREAM_ID),
@@ -210,8 +245,9 @@ async fn main() -> Result<(), anyhow::Error> {
                                 device.serial.is_ok()
                                     && context_guard.id_to_device.iter().all(
                                         |(_, listed_device)| {
-                                            device.bus_number != listed_device.bus_number
-                                                || device.address != listed_device.address
+                                            device.bus_number != listed_device.properties.bus_number
+                                                || device.address
+                                                    != listed_device.properties.address
                                         },
                                     )
                             })
@@ -228,17 +264,15 @@ async fn main() -> Result<(), anyhow::Error> {
                                 {
                                     println!(
                                         "{} | new device, id {}",
-                                        utc_string(),
+                                        now_utc_string(),
                                         next_device_id
                                     ); // @DEV
-                                    devices_and_proxies.push(
-                                        device::Device::create_device_and_proxies(
-                                            device::DeviceId(next_device_id),
-                                            listed_device,
-                                            device,
-                                            flag,
-                                        ),
-                                    );
+                                    devices_and_proxies.push(device::create_device_and_proxies(
+                                        device::DeviceId(next_device_id),
+                                        listed_device,
+                                        device,
+                                        flag,
+                                    ));
                                     next_device_id = (next_device_id + 1) % 0x1000000;
                                 }
                             }
@@ -249,7 +283,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                 let mut router_guard = context_guard
                                     .router
                                     .write()
-                                    .expect("router mutex is not poisoned");
+                                    .expect("router mutex is poisoned");
                                 router_guard
                                     .insert(device::StreamId::new(device_proxy.id, 0), Vec::new());
                                 router_guard
@@ -293,15 +327,15 @@ async fn main() -> Result<(), anyhow::Error> {
             loop {
                 packet_stack
                     .lock()
-                    .expect("packet stack mutex is not poisoned")
+                    .expect("packet stack mutex is poisoned")
                     .shrink_unused();
                 sample_stack
                     .lock()
-                    .expect("sample stack mutex is not poisoned")
+                    .expect("sample stack mutex is poisoned")
                     .shrink_unused();
                 record_state_stack
                     .lock()
-                    .expect("sample stack mutex is not poisoned")
+                    .expect("sample stack mutex is poisoned")
                     .shrink_unused();
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
@@ -417,7 +451,7 @@ async fn handle_tcp_stream(
         )
         .await
     {
-        println!("{} | serve_connection error: {:?}", utc_string(), error);
+        println!("{} | serve_connection error: {:?}", now_utc_string(), error);
     }
 }
 
@@ -492,7 +526,7 @@ async fn handle_http_request(
                                 ));
                                 println!(
                                     "{} | Listening for Transport requests on {}:{}",
-                                    utc_string(),
+                                    now_utc_string(),
                                     host,
                                     endpoint.port
                                 );
@@ -574,7 +608,7 @@ async fn handle_transport_session_wrapper(
     {
         println!(
             "{} | handle_transport_session (session id {}) error: {:?}",
-            utc_string(),
+            now_utc_string(),
             incoming_session_id,
             error
         );
@@ -589,7 +623,7 @@ async fn handle_transport_session(
     let session_request = incoming_session.await?;
     println!(
         "{} | new session (session id {}): authority {}, path {}",
-        utc_string(),
+        now_utc_string(),
         incoming_session_id,
         session_request.authority(),
         session_request.path()
@@ -614,7 +648,7 @@ async fn handle_transport_session(
 
     println!(
         "{} | manage_connection (session id {}) returned {:?}",
-        utc_string(),
+        now_utc_string(),
         incoming_session_id,
         result
     ); // @DEV

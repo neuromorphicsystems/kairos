@@ -161,6 +161,8 @@
 
     .popover {
         position: fixed;
+        left: 0;
+        top: 0;
         background-color: var(--background-3);
         border: 1px solid var(--border);
         border-radius: 8px;

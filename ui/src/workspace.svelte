@@ -9,20 +9,8 @@
     }: {
         activeDisplayId: ContainerId;
     } = $props();
-    const layoutToPosition: { [key in Layout]: number[] } = $state({
-        full: [],
-        h: [0.75],
-        hv1: [0.5, 0.5],
-        hv2: [0.5, 0.5],
-        v: [0.5],
-        vh1: [0.5, 0.5],
-        vh2: [0.5, 0.5],
-        hv1v2: [0.5, 0.5, 0.5],
-        vh1h2: [0.5, 0.5, 0.5],
-    });
 
     let workspace: HTMLElement = null;
-
     let control: {
         layoutAndIndex: [Layout, number];
         initialValue: number;
@@ -40,7 +28,7 @@
     function mouseDown(event: MouseEvent, layout: Layout, index: number) {
         control.layoutAndIndex = [layout, index];
         control.initialValue =
-            layoutToPosition[control.layoutAndIndex[0]][
+            appState.local.layoutToPosition[control.layoutAndIndex[0]][
                 control.layoutAndIndex[1]
             ];
         switch (layout) {
@@ -80,7 +68,7 @@
             } else {
                 position = event.clientY;
             }
-            layoutToPosition[control.layoutAndIndex[0]][
+            appState.local.layoutToPosition[control.layoutAndIndex[0]][
                 control.layoutAndIndex[1]
             ] = Math.min(
                 0.9,
@@ -109,53 +97,58 @@
         <div class="h">
             <Container
                 id={1}
-                size={layoutToPosition.h[0]}
+                size={appState.local.layoutToPosition.h[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
             <Container
                 id={2}
-                size={1.0 - layoutToPosition.h[0]}
+                size={1.0 - appState.local.layoutToPosition.h[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
             class="control-h"
-            style="left: 0; right: 0; top: calc({layoutToPosition.h[0] *
-                100}% - 6px);"
+            style="left: 0; right: 0; top: calc({appState.local.layoutToPosition
+                .h[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "h", 0)}
             role="none"
         ></div>
     {:else if appState.local.layout === "hv1"}
         <div class="h">
-            <div class="v" style="flex-grow: {layoutToPosition.hv1[0]}">
+            <div
+                class="v"
+                style="flex-grow: {appState.local.layoutToPosition.hv1[0]}"
+            >
                 <Container
                     id={1}
-                    size={layoutToPosition.hv1[1]}
+                    size={appState.local.layoutToPosition.hv1[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.hv1[1]}
+                    size={1.0 - appState.local.layoutToPosition.hv1[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <Container
                 id={2}
-                size={1.0 - layoutToPosition.hv1[0]}
+                size={1.0 - appState.local.layoutToPosition.hv1[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
             class="control-v"
-            style="top: 0; bottom: {(1.0 - layoutToPosition.hv1[0]) *
-                100}%; left: calc({layoutToPosition.hv1[1] * 100}% - 6px);"
+            style="top: 0; bottom: {(1.0 -
+                appState.local.layoutToPosition.hv1[0]) *
+                100}%; left: calc({appState.local.layoutToPosition.hv1[1] *
+                100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv1", 1)}
             role="none"
         ></div>
         <div
             class="control-h"
-            style="left: 0; right: 0; top: calc({layoutToPosition.hv1[0] *
-                100}% - 6px);"
+            style="left: 0; right: 0; top: calc({appState.local.layoutToPosition
+                .hv1[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv1", 0)}
             role="none"
         ></div>
@@ -163,34 +156,38 @@
         <div class="h">
             <Container
                 id={1}
-                size={layoutToPosition.hv2[0]}
+                size={appState.local.layoutToPosition.hv2[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
-            <div class="v" style="flex-grow: {1.0 - layoutToPosition.hv2[0]}">
+            <div
+                class="v"
+                style="flex-grow: {1.0 -
+                    appState.local.layoutToPosition.hv2[0]}"
+            >
                 <Container
                     id={2}
-                    size={layoutToPosition.hv2[1]}
+                    size={appState.local.layoutToPosition.hv2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.hv2[1]}
+                    size={1.0 - appState.local.layoutToPosition.hv2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
         <div
             class="control-v"
-            style="top: {layoutToPosition.hv2[0] *
-                100}%; bottom: 0; left: calc({layoutToPosition.hv2[1] *
-                100}% - 6px);"
+            style="top: {appState.local.layoutToPosition.hv2[0] *
+                100}%; bottom: 0; left: calc({appState.local.layoutToPosition
+                .hv2[1] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv2", 1)}
             role="none"
         ></div>
         <div
             class="control-h"
-            style="left: 0; right: 0; top: calc({layoutToPosition.hv2[0] *
-                100}% - 6px);"
+            style="left: 0; right: 0; top: calc({appState.local.layoutToPosition
+                .hv2[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv2", 0)}
             role="none"
         ></div>
@@ -198,53 +195,58 @@
         <div class="v">
             <Container
                 id={1}
-                size={layoutToPosition.v[0]}
+                size={appState.local.layoutToPosition.v[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
             <Container
                 id={2}
-                size={1.0 - layoutToPosition.v[0]}
+                size={1.0 - appState.local.layoutToPosition.v[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
             class="control-v"
-            style="top: 0; bottom: 0; left: calc({layoutToPosition.v[0] *
-                100}% - 6px);"
+            style="top: 0; bottom: 0; left: calc({appState.local
+                .layoutToPosition.v[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "v", 0)}
             role="none"
         ></div>
     {:else if appState.local.layout === "vh1"}
         <div class="v">
-            <div class="h" style="flex-grow: {layoutToPosition.vh1[0]}">
+            <div
+                class="h"
+                style="flex-grow: {appState.local.layoutToPosition.vh1[0]}"
+            >
                 <Container
                     id={1}
-                    size={layoutToPosition.vh1[1]}
+                    size={appState.local.layoutToPosition.vh1[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.vh1[1]}
+                    size={1.0 - appState.local.layoutToPosition.vh1[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
             <Container
                 id={2}
-                size={1.0 - layoutToPosition.vh1[0]}
+                size={1.0 - appState.local.layoutToPosition.vh1[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
         </div>
         <div
             class="control-h"
-            style="left: 0; right: {(1.0 - layoutToPosition.vh1[0]) *
-                100}%; top: calc({layoutToPosition.vh1[1] * 100}% - 6px);"
+            style="left: 0; right: {(1.0 -
+                appState.local.layoutToPosition.vh1[0]) *
+                100}%; top: calc({appState.local.layoutToPosition.vh1[1] *
+                100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh1", 1)}
             role="none"
         ></div>
         <div
             class="control-v"
-            style="top: 0; bottom: 0; left: calc({layoutToPosition.vh1[0] *
-                100}% - 6px);"
+            style="top: 0; bottom: 0; left: calc({appState.local
+                .layoutToPosition.vh1[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh1", 0)}
             role="none"
         ></div>
@@ -252,132 +254,154 @@
         <div class="v">
             <Container
                 id={1}
-                size={layoutToPosition.vh2[0]}
+                size={appState.local.layoutToPosition.vh2[0]}
                 bind:activeId={activeDisplayId}
             ></Container>
-            <div class="h" style="flex-grow: {1.0 - layoutToPosition.vh2[0]}">
+            <div
+                class="h"
+                style="flex-grow: {1.0 -
+                    appState.local.layoutToPosition.vh2[0]}"
+            >
                 <Container
                     id={2}
-                    size={layoutToPosition.vh2[1]}
+                    size={appState.local.layoutToPosition.vh2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.vh2[1]}
+                    size={1.0 - appState.local.layoutToPosition.vh2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
         <div
             class="control-h"
-            style="left: {layoutToPosition.vh2[0] *
-                100}%; right: 0; top: calc({layoutToPosition.vh2[1] *
-                100}% - 6px);"
+            style="left: {appState.local.layoutToPosition.vh2[0] *
+                100}%; right: 0; top: calc({appState.local.layoutToPosition
+                .vh2[1] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh2", 1)}
             role="none"
         ></div>
         <div
             class="control-v"
-            style="top: 0; bottom: 0; left: calc({layoutToPosition.vh2[0] *
-                100}% - 6px);"
+            style="top: 0; bottom: 0; left: calc({appState.local
+                .layoutToPosition.vh2[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh2", 0)}
             role="none"
         ></div>
     {:else if appState.local.layout === "hv1v2"}
         <div class="h">
-            <div class="v" style="flex-grow: {layoutToPosition.hv1v2[0]}">
+            <div
+                class="v"
+                style="flex-grow: {appState.local.layoutToPosition.hv1v2[0]}"
+            >
                 <Container
                     id={1}
-                    size={layoutToPosition.hv1v2[1]}
+                    size={appState.local.layoutToPosition.hv1v2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={4}
-                    size={1.0 - layoutToPosition.hv1v2[1]}
+                    size={1.0 - appState.local.layoutToPosition.hv1v2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
-            <div class="v" style="flex-grow: {1.0 - layoutToPosition.hv1v2[0]}">
+            <div
+                class="v"
+                style="flex-grow: {1.0 -
+                    appState.local.layoutToPosition.hv1v2[0]}"
+            >
                 <Container
                     id={2}
-                    size={layoutToPosition.hv1v2[2]}
+                    size={appState.local.layoutToPosition.hv1v2[2]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.hv1v2[2]}
+                    size={1.0 - appState.local.layoutToPosition.hv1v2[2]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
         <div
             class="control-v"
-            style="top: 0; bottom: {(1.0 - layoutToPosition.hv1v2[0]) *
-                100}%; left: calc({layoutToPosition.hv1v2[1] * 100}% - 6px);"
+            style="top: 0; bottom: {(1.0 -
+                appState.local.layoutToPosition.hv1v2[0]) *
+                100}%; left: calc({appState.local.layoutToPosition.hv1v2[1] *
+                100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv1v2", 1)}
             role="none"
         ></div>
         <div
             class="control-v"
-            style="top: {layoutToPosition.hv1v2[0] *
-                100}%; bottom: 0; left: calc({layoutToPosition.hv1v2[2] *
-                100}% - 6px);"
+            style="top: {appState.local.layoutToPosition.hv1v2[0] *
+                100}%; bottom: 0; left: calc({appState.local.layoutToPosition
+                .hv1v2[2] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv1v2", 2)}
             role="none"
         ></div>
         <div
             class="control-h"
-            style="left: 0; right: 0; top: calc({layoutToPosition.hv1v2[0] *
-                100}% - 6px);"
+            style="left: 0; right: 0; top: calc({appState.local.layoutToPosition
+                .hv1v2[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "hv1v2", 0)}
             role="none"
         ></div>
     {:else if appState.local.layout === "vh1h2"}
         <div class="v">
-            <div class="h" style="flex-grow: {layoutToPosition.vh1h2[0]}">
+            <div
+                class="h"
+                style="flex-grow: {appState.local.layoutToPosition.vh1h2[0]}"
+            >
                 <Container
                     id={1}
-                    size={layoutToPosition.vh1h2[1]}
+                    size={appState.local.layoutToPosition.vh1h2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={4}
-                    size={1.0 - layoutToPosition.vh1h2[1]}
+                    size={1.0 - appState.local.layoutToPosition.vh1h2[1]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
-            <div class="h" style="flex-grow: {1.0 - layoutToPosition.vh1h2[0]}">
+            <div
+                class="h"
+                style="flex-grow: {1.0 -
+                    appState.local.layoutToPosition.vh1h2[0]}"
+            >
                 <Container
                     id={2}
-                    size={layoutToPosition.vh1h2[2]}
+                    size={appState.local.layoutToPosition.vh1h2[2]}
                     bind:activeId={activeDisplayId}
                 ></Container>
                 <Container
                     id={3}
-                    size={1.0 - layoutToPosition.vh1h2[2]}
+                    size={1.0 - appState.local.layoutToPosition.vh1h2[2]}
                     bind:activeId={activeDisplayId}
                 ></Container>
             </div>
         </div>
         <div
             class="control-h"
-            style="left: 0; right: {(1.0 - layoutToPosition.vh1h2[0]) *
-                100}%; top: calc({layoutToPosition.vh1h2[1] * 100}% - 6px);"
+            style="left: 0; right: {(1.0 -
+                appState.local.layoutToPosition.vh1h2[0]) *
+                100}%; top: calc({appState.local.layoutToPosition.vh1h2[1] *
+                100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh1h2", 1)}
             role="none"
         ></div>
         <div
             class="control-h"
-            style="left: {layoutToPosition.vh1h2[0] *
-                100}%; right: 0; top: calc({layoutToPosition.vh1h2[2] *
-                100}% - 6px);"
+            style="left: {appState.local.layoutToPosition.vh1h2[0] *
+                100}%; right: 0; top: calc({appState.local.layoutToPosition
+                .vh1h2[2] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh1h2", 2)}
             role="none"
         ></div>
         <div
             class="control-v"
-            style="top: 0; bottom: 0; left: calc({layoutToPosition.vh1h2[0] *
-                100}% - 6px);"
+            style="top: 0; bottom: 0; left: calc({appState.local
+                .layoutToPosition.vh1h2[0] * 100}% - 6px);"
             onmousedown={event => mouseDown(event, "vh1h2", 0)}
             role="none"
         ></div>

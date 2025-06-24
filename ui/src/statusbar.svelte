@@ -3,6 +3,8 @@
 
     import appState from "./appState.svelte";
     import LayoutPopover from "./layoutPopover.svelte";
+    import PopoverMask from "./popoverMask.svelte";
+    import RecordingsPopover from "./recordingsPopover.svelte";
 
     let {
         devicePaneOpen = $bindable(),
@@ -14,14 +16,33 @@
         activeDisplayId: ContainerId;
     } = $props();
 
-    let layoutOpen: boolean = $state(false);
+    let activeMenu: number = $state(0);
+    let recordingsLeft: number = $state(0);
+    let workspaceLeft: number = $state(0);
+    let layoutLeft: number = $state(0);
+    let recording = $derived(
+        Object.values(appState.deviceIdToRecordState).some(
+            recordState => recordState.recording != null,
+        ),
+    );
 </script>
 
-<div class="status-bar {appState.local.connectionStatus}">
+<PopoverMask
+    open={activeMenu === 2}
+    onClose={() => {
+        activeMenu = 0;
+    }}
+></PopoverMask>
+
+<div
+    class="status-bar {appState.local.connectionStatus} {recording
+        ? 'recording'
+        : ''}"
+>
     <div class="left">
         <button
             class={devicePaneOpen ? "active" : ""}
-            aria-label="Device"
+            aria-label="Record"
             onclick={() => {
                 devicePaneOpen = !devicePaneOpen;
             }}
@@ -33,32 +54,53 @@
                     /></svg
                 >
             </div>
+            <div class="label">Record</div>
         </button>
+
+        <div class="menu">
+            <button
+                class={activeMenu === 1 ? "active" : ""}
+                aria-label="Recordings"
+                onclick={event => {
+                    recordingsLeft =
+                        event.currentTarget.getBoundingClientRect().left;
+                    activeMenu = 1;
+                }}
+            >
+                <div class="label">Recordings</div>
+            </button>
+            <button
+                class={activeMenu === 2 ? "active" : ""}
+                aria-label="Workspace"
+                onclick={event => {
+                    workspaceLeft =
+                        event.currentTarget.getBoundingClientRect().left;
+                    activeMenu = 2;
+                }}
+            >
+                <div class="label">Workspace</div>
+            </button>
+            <button
+                class={activeMenu === 3 ? "active" : ""}
+                aria-label="Layout"
+                onclick={event => {
+                    layoutLeft =
+                        event.currentTarget.getBoundingClientRect().left;
+                    activeMenu = 3;
+                }}
+            >
+                <div class="label">Layout</div>
+            </button>
+        </div>
     </div>
     <div class="center">
-        <button
-            class={layoutOpen ? "active" : ""}
-            aria-label="Layout"
-            onclick={() => {
-                layoutOpen = !layoutOpen;
-            }}
-        >
-            <div class="label">Layout</div>
-        </button>
-        <LayoutPopover bind:open={layoutOpen} bind:activeDisplayId
-        ></LayoutPopover>
         {#if appState.local.connectionStatus === "connecting"}
             <div class="connection-label">Connecting...</div>
         {:else if appState.local.connectionStatus === "disconnected"}
             <div class="connection-label">Disconnected</div>
+        {:else if recording}
+            <div class="connection-label">Recording</div>
         {/if}
-        <button
-            style="visibility: hidden;"
-            aria-label="Layout"
-            onclick={() => {}}
-        >
-            <div class="label">Layout</div>
-        </button>
     </div>
     <div class="right">
         <button
@@ -76,9 +118,39 @@
                     /></svg
                 >
             </div>
+            <div class="label">Display</div>
         </button>
     </div>
 </div>
+
+<RecordingsPopover
+    open={activeMenu === 1}
+    left={recordingsLeft}
+    onClose={() => {
+        activeMenu = 0;
+    }}
+></RecordingsPopover>
+
+<div
+    class="popover {activeMenu === 2 ? '' : 'hidden'}"
+    style="left: {workspaceLeft}px"
+>
+    <div class="choice" onclick={() => {}} role="none">
+        <div class="label">Load workspace...</div>
+    </div>
+    <div class="choice" onclick={() => {}} role="none">
+        <div class="label">Save workspace...</div>
+    </div>
+</div>
+
+<LayoutPopover
+    open={activeMenu === 3}
+    bind:activeDisplayId
+    left={layoutLeft}
+    onClose={() => {
+        activeMenu = 0;
+    }}
+></LayoutPopover>
 
 <style>
     .status-bar {
@@ -107,20 +179,44 @@
         );
     }
 
+    .status-bar.connected.recording {
+        background-color: color-mix(
+            in oklab,
+            var(--background-3) 30%,
+            var(--blue-1) 70%
+        );
+    }
+
     .left {
-        width: var(--device-pane-width);
+        flex-grow: 0;
+        flex-shrink: 0;
         padding-left: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .menu {
+        border-left: 1px solid var(--border);
+        padding-left: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
     }
 
     .center {
+        flex-shrink: 1;
         flex-grow: 1;
         display: flex;
-        justify-content: space-between;
+        justify-content: space-around;
         align-items: center;
+        font-size: 14px;
+        color: var(--content-3);
     }
 
     .right {
-        width: var(--display-pane-width);
+        flex-grow: 0;
+        flex-shrink: 0;
         padding-right: 8px;
         display: flex;
         justify-content: flex-end;
@@ -133,7 +229,7 @@
         font: inherit;
         outline: inherit;
         display: flex;
-        flex-direction: column;
+        flex-direction: row;
         align-items: center;
         padding: 4px;
         border-radius: 6px;
@@ -181,5 +277,39 @@
 
     .connection-label {
         color: var(--content-3);
+    }
+
+    .popover {
+        position: fixed;
+        background-color: var(--background-3);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        z-index: 11;
+        overflow: hidden;
+        font-size: 14px;
+        color: var(--content-3);
+        box-shadow: 0 0 8px 0 #00000080;
+        top: calc(var(--status-bar-height) - 4px);
+        display: flex;
+        flex-direction: column;
+        padding: 10px;
+        gap: 10px;
+    }
+
+    .choice {
+        cursor: pointer;
+        padding: 8px;
+        display: flex;
+        align-items: center;
+        user-select: none;
+        border-radius: 6px;
+    }
+
+    .choice:hover {
+        background-color: var(--button-background-hover);
+    }
+
+    .hidden {
+        visibility: hidden;
     }
 </style>

@@ -24,6 +24,7 @@ export const MAXIMUM_F32_VALUE: number = 3600000000;
 export const MESSAGE_SOURCE_ID: number = 0xffffff00;
 export const RECORD_STATE_SOURCE_ID: number = 0xffffff01;
 export const CHART_AUTO_ORIENTATION_RATIO: number = 2.7;
+export const AUTOTRIGGER_MAXIMUM_WINDOW_SIZE: number = 600;
 
 export const CHART_RANGES = [0.0, 5.0, 10.0, 30.0, 60.0];
 

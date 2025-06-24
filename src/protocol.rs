@@ -1,113 +1,65 @@
 use crate::constants;
 use anyhow::anyhow;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum Stream {
     Evt3 { width: u16, height: u16 },
     Evk4Samples,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct IntegerParameter {
-    pub name: String,
-    pub description: String,
-    pub value: i32,
-    pub minimum: i32,
-    pub maximum: i32,
-    pub default: i32,
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct Lookback {
+    pub enabled: bool,
+    pub maximum_duration_us: u64,
+    pub maximum_size_bytes: usize,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BooleanParameter {
-    pub name: String,
-    pub description: String,
-    pub value: bool,
-    pub default: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum Parameter {
-    Integer(IntegerParameter),
-    Boolean(BooleanParameter),
-}
-
-#[derive(thiserror::Error, Debug, Clone)]
-pub enum ParameterError {
-    #[error("incompatible parameter type for {name} (expected {expected}, got {got})")]
-    IncompatibleTypes {
-        name: String,
-        expected: String,
-        got: String,
-    },
-
-    #[error("{name} is out of bound ({value} is not in [{minimum}, {maximum}])")]
-    OutOfBounds {
-        name: String,
-        value: i32,
-        minimum: i32,
-        maximum: i32,
-    },
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum ParameterValue {
-    Integer { value: i32 },
-    Boolean { value: bool },
-}
-
-impl Parameter {
-    pub fn u8(name: &str, description: &str, default: u8) -> Self {
-        Self::Integer(IntegerParameter {
-            name: name.to_owned(),
-            description: description.to_owned(),
-            value: default as i32,
-            minimum: 0,
-            maximum: 255,
-            default: default as i32,
-        })
-    }
-
-    pub fn update(&mut self, value: &ParameterValue) -> Result<(), ParameterError> {
-        match self {
-            Parameter::Integer(parameter) => match value {
-                ParameterValue::Integer { value } => {
-                    if *value < parameter.minimum || *value > parameter.maximum {
-                        Err(ParameterError::OutOfBounds {
-                            name: parameter.name.clone(),
-                            value: *value,
-                            minimum: parameter.minimum,
-                            maximum: parameter.maximum,
-                        })
-                    } else {
-                        parameter.value = *value;
-                        Ok(())
-                    }
-                }
-                ParameterValue::Boolean { .. } => Err(ParameterError::IncompatibleTypes {
-                    name: parameter.name.clone(),
-                    expected: "string".to_owned(),
-                    got: "boolean".to_owned(),
-                }),
-            },
-            Parameter::Boolean(parameter) => match value {
-                ParameterValue::Integer { .. } => Err(ParameterError::IncompatibleTypes {
-                    name: parameter.name.clone(),
-                    expected: "boolean".to_owned(),
-                    got: "string".to_owned(),
-                }),
-                ParameterValue::Boolean { value } => {
-                    parameter.value = *value;
-                    Ok(())
-                }
-            },
+impl Default for Lookback {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            maximum_duration_us: 10_000_000,
+            maximum_size_bytes: 1_024_000_000,
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct Autostop {
+    pub enabled: bool,
+    pub duration_us: u64,
+}
+
+impl Default for Autostop {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            duration_us: 10_000_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct Autotrigger {
+    pub enabled: bool,
+    pub short_sliding_window: usize,
+    pub long_sliding_window: usize,
+    pub threshold: f32,
+}
+
+impl Default for Autotrigger {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            short_sliding_window: 1,
+            long_sliding_window: 120,
+            threshold: 10.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Device {
     pub id: u32,
     pub name: String,
@@ -117,9 +69,12 @@ pub struct Device {
     pub address: u8,
     pub streams: Vec<Stream>,
     pub configuration: neuromorphic_drivers::Configuration,
+    pub lookback: Lookback,
+    pub autostop: Autostop,
+    pub autotrigger: Autotrigger,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SharedClientState {
     pub data_directory: String,
     pub disk_available_and_total_space: Option<(u64, u64)>,
@@ -127,7 +82,30 @@ pub struct SharedClientState {
     pub errors: Vec<String>,
 }
 
-impl SharedClientState {
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum RecordingState {
+    Ongoing,
+    Incomplete { size_bytes: u64 },
+    Complete { size_bytes: u64, zip: bool },
+    Queued { size_bytes: u64, zip: bool },
+    Converting { size_bytes: u64, zip: bool },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Recording {
+    pub name: String,
+    pub state: RecordingState,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", content = "content")]
+pub enum ServerMessage<'a> {
+    SharedClientState(&'a SharedClientState),
+    Recordings(&'a Vec<Recording>),
+}
+
+impl<'a> ServerMessage<'a> {
     pub fn to_bytes(&self) -> Result<Vec<u8>, anyhow::Error> {
         let mut bytes = vec![0u8; 4];
         serde_json::to_writer(&mut bytes, self)?;
@@ -135,7 +113,7 @@ impl SharedClientState {
         bytes[0..4].copy_from_slice(&(length as u32).to_le_bytes());
         if bytes.len() > constants::MESSAGE_MAXIMUM_LENGTH as usize {
             Err(anyhow!(
-                "the message {:?} in serialized form exceeded the maximum length ({} B > {} B)",
+                "the server message {:?} in serialized form exceeded the maximum length ({} B > {} B)",
                 self,
                 bytes.len(),
                 constants::MESSAGE_MAXIMUM_LENGTH
@@ -158,10 +136,7 @@ pub fn stream_description(
     message
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Autotrigger {}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
     Ping,
@@ -172,17 +147,17 @@ pub enum ClientMessage {
         device_id: u32,
         configuration: neuromorphic_drivers::Configuration,
     },
-    UpdateAutotrigger {
-        enabled: bool,
+    UpdateLookback {
+        device_id: u32,
+        lookback: Lookback,
     },
     UpdateAutostop {
-        enabled: bool,
-        duration_us: u64,
+        device_id: u32,
+        autostop: Autostop,
     },
-    UpdateLookback {
-        enabled: bool,
-        maximum_duration_us: u64,
-        maximum_size_bytes: usize,
+    UpdateAutotrigger {
+        device_id: u32,
+        autotrigger: Autotrigger,
     },
     StartRecording {
         device_id: u32,

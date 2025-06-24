@@ -1,5 +1,9 @@
 import type {
+    Autostop,
+    Autotrigger,
     EventDisplayProperties,
+    Lookback,
+    RecordState,
     SampleDisplayProperties,
 } from "./appState.svelte";
 import type { Configuration } from "./deviceConfiguration";
@@ -53,99 +57,129 @@ transportWorker.addEventListener("message", ({ data }) => {
                 },
             );
 
-            appState.shared = message;
-            for (
-                let index = appState.local.nextErrorIndex;
-                index < appState.shared.errors.length;
-                ++index
-            ) {
-                toast.error(appState.shared.errors[index], {
-                    duration: Number.POSITIVE_INFINITY,
-                });
-            }
-            appState.local.nextErrorIndex = appState.shared.errors.length;
-
-            console.log($state.snapshot(appState.shared)); // @DEV
-
-            if (appState.shared.devices.length === 0) {
-                appState.local.deviceIndex = null;
-            } else if (
-                appState.local.deviceIndex == null ||
-                appState.local.deviceIndex >= appState.shared.devices.length
-            ) {
-                appState.local.deviceIndex = 0;
-            }
-            for (const display of appState.local.displays) {
-                if (display != null) {
-                    if (display.target != null) {
-                        let found = false;
-                        for (const device of appState.shared.devices) {
-                            if (
-                                device.id === display.target.deviceId &&
-                                device.streams.length >
-                                    display.target.streamIndex
-                            ) {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            display.target = null;
-                            if (
-                                display.properties.type ===
-                                "SampleDisplayProperties"
-                            ) {
-                                display.properties.namesAndRangesIndices = [];
-                                display.properties.hash =
-                                    utilities.nextUnique();
-                            }
-                        }
+            switch (message.type) {
+                case "SharedClientState": {
+                    appState.shared = message.content;
+                    for (
+                        let index = appState.local.nextErrorIndex;
+                        index < appState.shared.errors.length;
+                        ++index
+                    ) {
+                        toast.error(appState.shared.errors[index], {
+                            duration: Number.POSITIVE_INFINITY,
+                        });
                     }
-                    if (display.target == null) {
-                        for (const device of appState.shared.devices) {
-                            let streamIndex = 0;
-                            for (const stream of device.streams) {
-                                if (
-                                    (display.properties.type ===
-                                        "EventDisplayProperties" &&
-                                        stream.type === "Evt3") ||
-                                    (display.properties.type ===
-                                        "SampleDisplayProperties" &&
-                                        stream.type === "Evk4Samples")
-                                ) {
-                                    display.target = {
-                                        deviceId: device.id,
-                                        streamIndex,
-                                    };
+                    appState.local.nextErrorIndex =
+                        appState.shared.errors.length;
+                    if (appState.shared.devices.length === 0) {
+                        appState.local.deviceIndex = null;
+                    } else if (
+                        appState.local.deviceIndex == null ||
+                        appState.local.deviceIndex >=
+                            appState.shared.devices.length
+                    ) {
+                        appState.local.deviceIndex = 0;
+                    }
+                    for (const display of appState.local.displays) {
+                        if (display != null) {
+                            if (display.target != null) {
+                                let found = false;
+                                for (const device of appState.shared.devices) {
+                                    if (
+                                        device.id === display.target.deviceId &&
+                                        device.streams.length >
+                                            display.target.streamIndex
+                                    ) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    display.target = null;
                                     if (
                                         display.properties.type ===
                                         "SampleDisplayProperties"
                                     ) {
                                         display.properties.namesAndRangesIndices =
-                                            defaultNamesAndRanges(stream);
+                                            [];
                                         display.properties.hash =
                                             utilities.nextUnique();
                                     }
-                                    break;
                                 }
-                                ++streamIndex;
                             }
-                            if (display.target != null) {
-                                break;
+                            if (display.target == null) {
+                                for (const device of appState.shared.devices) {
+                                    let streamIndex = 0;
+                                    for (const stream of device.streams) {
+                                        if (
+                                            (display.properties.type ===
+                                                "EventDisplayProperties" &&
+                                                stream.type === "Evt3") ||
+                                            (display.properties.type ===
+                                                "SampleDisplayProperties" &&
+                                                stream.type === "Evk4Samples")
+                                        ) {
+                                            display.target = {
+                                                deviceId: device.id,
+                                                streamIndex,
+                                            };
+                                            if (
+                                                display.properties.type ===
+                                                "SampleDisplayProperties"
+                                            ) {
+                                                display.properties.namesAndRangesIndices =
+                                                    defaultNamesAndRanges(
+                                                        stream,
+                                                    );
+                                                display.properties.hash =
+                                                    utilities.nextUnique();
+                                            }
+                                            break;
+                                        }
+                                        ++streamIndex;
+                                    }
+                                    if (display.target != null) {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
+                    break;
+                }
+                case "Recordings": {
+                    appState.recordings = message.content;
+                    break;
+                }
+                default: {
+                    throw new Error(`unsupported message type ${message.type}`);
                 }
             }
             break;
         }
         case constants.TRANSPORT_TO_MAIN_RECORD_STATE_BUFFER: {
-            const size = new Uint32Array(data.buffer, 0, 1)[0];
-            console.log(
-                "received record state",
-                new Uint8Array(data.buffer, 4, size - 4),
-            ); // @DEV
-            // @DEV parse message here
+            const dataView = new DataView(data.buffer);
+            const size = dataView.getUint32(0, true);
+            const deviceId = dataView.getUint32(4, true);
+            const recordState: RecordState = {
+                lookback:
+                    dataView.getUint8(8) === 0
+                        ? null
+                        : {
+                              duration_us: dataView.getBigUint64(9, true),
+                              size_bytes: dataView.getBigUint64(17, true),
+                          },
+                recording:
+                    dataView.getUint8(25) === 0
+                        ? null
+                        : {
+                              name: decoder.decode(
+                                  new Uint8Array(data.buffer, 42, size - 42),
+                              ),
+                              duration_us: dataView.getBigUint64(26, true),
+                              size_bytes: dataView.getBigUint64(34, true),
+                          },
+            };
             transportWorker.postMessage(
                 {
                     type: constants.MAIN_TO_TRANSPORT_BUFFER,
@@ -156,7 +190,7 @@ transportWorker.addEventListener("message", ({ data }) => {
                     transfer: [data.buffer],
                 },
             );
-            // @DEV update appState.deviceIdToRecordState
+            appState.deviceIdToRecordState[deviceId] = recordState;
             break;
         }
         case constants.TRANSPORT_TO_DECODE_BUFFER: {
@@ -239,7 +273,7 @@ function startStream(
     let stream = null;
 
     console.log(
-        `${utilities.utcString()} | startStream(${deviceId}, ${streamIndex})`,
+        `${utilities.utcString()} | startStream(${deviceId}, ${streamIndex}), sourceId=${sourceId}`,
     ); // @DEV
 
     for (const device of appState.shared.devices) {
@@ -311,40 +345,155 @@ function startStream(
         });
         return [decoder, painter];
     } else if (stream.type === "Evk4Samples") {
+        console.log(
+            `${utilities.utcString()} | create new evk4 samples stream`,
+        ); // @DEV
+
         const painter = new SamplePainter([
             {
                 name: "Event rate",
-                yLabel: "Event rate (Hz)",
-                units: "Hz",
-                logarithmic: true,
-                curvesNamesAndColors: [
-                    ["Total", "#5C538B"],
-                    ["On", "#4F88B9"],
-                    ["Off", "#723959"],
+                yAxes: [
+                    {
+                        label: "Event rate (Hz)",
+                        units: "Hz",
+                        logarithmic: true,
+                    },
+                    null,
+                ],
+                curves: [
+                    {
+                        name: "Total",
+                        color: "#5C538B",
+                        dash: null,
+                        axis: 0,
+                        order: 2,
+                    },
+                    {
+                        name: "On",
+                        color: "#4F88B9",
+                        dash: null,
+                        axis: 0,
+                        order: 1,
+                    },
+                    {
+                        name: "Off",
+                        color: "#723959",
+                        dash: null,
+                        axis: 0,
+                        order: 0,
+                    },
                 ],
             },
             {
                 name: "Illuminance",
-                yLabel: "Illuminance (lx)",
-                units: "lx",
-                logarithmic: false,
-                curvesNamesAndColors: [["Illuminance", "#C3A34B"]],
+                yAxes: [
+                    {
+                        label: "Illuminance (lx)",
+                        units: "lx",
+                        logarithmic: false,
+                    },
+                    null,
+                ],
+                curves: [
+                    {
+                        name: "Illuminance",
+                        color: "#C3A34B",
+                        dash: null,
+                        axis: 0,
+                        order: 0,
+                    },
+                ],
             },
             {
                 name: "Temperature",
-                yLabel: "Temperature (ºC)",
-                units: "ºC",
-                logarithmic: false,
-                curvesNamesAndColors: [["Temperature", "#874037"]],
+                yAxes: [
+                    {
+                        label: "Temperature (ºC)",
+                        units: "ºC",
+                        logarithmic: false,
+                    },
+                    null,
+                ],
+                curves: [
+                    {
+                        name: "Temperature",
+                        color: "#874037",
+                        dash: null,
+                        axis: 0,
+                        order: 0,
+                    },
+                ],
             },
             {
                 name: "External events",
-                yLabel: "External events",
-                units: null,
-                logarithmic: false,
-                curvesNamesAndColors: [
-                    ["Rising", "#B4DEC6"],
-                    ["Falling", "#74BBCD"],
+                yAxes: [
+                    {
+                        label: "External events",
+                        units: null,
+                        logarithmic: false,
+                    },
+                    null,
+                ],
+                curves: [
+                    {
+                        name: "Rising",
+                        color: "#B4DEC6",
+                        dash: null,
+                        axis: 0,
+                        order: 1,
+                    },
+                    {
+                        name: "Falling",
+                        color: "#74BBCD",
+                        dash: null,
+                        axis: 0,
+                        order: 0,
+                    },
+                ],
+            },
+            {
+                name: "Autotrigger",
+                yAxes: [
+                    {
+                        label: "Event rate (Hz)",
+                        units: "Hz",
+                        logarithmic: true,
+                    },
+                    {
+                        label: "Ratio",
+                        units: null,
+                        logarithmic: true,
+                    },
+                ],
+                curves: [
+                    {
+                        name: "Short",
+                        color: "#5C538B",
+                        dash: null,
+                        axis: 0,
+                        order: 3,
+                    },
+                    {
+                        name: "Long",
+                        color: "#723959",
+                        dash: null,
+                        axis: 0,
+                        order: 2,
+                    },
+                    {
+                        name: "Ratio",
+                        color: "#AAAAAA",
+                        dash: null,
+                        axis: 1,
+                        order: 1,
+                    },
+                    {
+                        name: "Threshold",
+                        color: "#AAAAAA",
+                        dash: [5, 5],
+                        axis: 1,
+                        order: 0,
+                    },
                 ],
             },
         ]);
@@ -367,7 +516,7 @@ function startStream(
         sourceIdToDecoderAndPainter.set(sourceId, [decoder, painter]);
         sendMessageToServer({
             type: "StartStream",
-            id: sourceId,
+            stream_id: sourceId,
         });
         return [decoder, painter];
     } else {
@@ -402,6 +551,32 @@ export function updateConfiguration(
         type: "UpdateConfiguration",
         device_id: deviceId,
         configuration,
+    });
+}
+
+export function updateLookback(deviceId: number, lookback: Lookback) {
+    console.log(); // @DEV
+
+    sendMessageToServer({
+        type: "UpdateLookback",
+        device_id: deviceId,
+        lookback,
+    });
+}
+
+export function updateAutostop(deviceId: number, autostop: Autostop) {
+    sendMessageToServer({
+        type: "UpdateAutostop",
+        device_id: deviceId,
+        autostop,
+    });
+}
+
+export function updateAutotrigger(deviceId: number, autotrigger: Autotrigger) {
+    sendMessageToServer({
+        type: "UpdateAutotrigger",
+        device_id: deviceId,
+        autotrigger,
     });
 }
 

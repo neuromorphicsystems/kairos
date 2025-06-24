@@ -15,3 +15,4 @@ pub const STACK_MINIMUM_TIME_WINDOW: std::time::Duration = std::time::Duration::
 pub const STACK_MINIMUM_SAMPLES: usize = 10;
 pub const SAMPLE_STACK_LENGTH: usize = 256;
 pub const RECORD_STATE_STACK_LENGTH: usize = 256;
+pub const AUTOTRIGGER_MAXIMUM_WINDOW_SIZE: usize = 600;

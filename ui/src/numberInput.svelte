@@ -43,7 +43,8 @@
 <div class="number-input" style="padding-top: {paddingTop}px">
     <div
         class="label {labelBold ? 'bold' : ''}"
-        style="width: {labelWidth}px; text-align: {rightSide
+        style="width: {labelWidth -
+            (rightSide ? 0 : 10)}px; text-align: {rightSide
             ? 'left'
             : 'right'}; margin-right: {rightSide ? 0 : 10}px"
     >
@@ -115,7 +116,7 @@
                 onChange(newValue);
             }
             if (value === newValue) {
-                event.currentTarget.value = newValue.toString();
+                event.currentTarget.value = newValue.toFixed(digits);
             } else {
                 value = newValue;
             }
@@ -125,14 +126,25 @@
         {step}
     />
     {#if units != null}
-        <div
-            class="units"
-            style="right: calc(var(--display-pane-width) - 40px - {labelWidth +
-                inputWidth -
-                8}px)"
-        >
-            {units}
-        </div>
+        {#if rightSide}
+            <div
+                class="units"
+                style="left: {labelWidth +
+                    inputWidth -
+                    8}px; transform: translateX(-100%)"
+            >
+                {units}
+            </div>
+        {:else}
+            <div
+                class="units"
+                style="right: calc(var(--display-pane-width) - 40px - {labelWidth +
+                    inputWidth -
+                    8}px)"
+            >
+                {units}
+            </div>
+        {/if}
     {/if}
 
     <div
@@ -167,6 +179,8 @@
     }
 
     .label {
+        flex-grow: 0;
+        flex-shrink: 1;
         font-size: 14px;
         color: var(--content-0);
     }
@@ -189,6 +203,8 @@
     }
 
     input {
+        flex-grow: 0;
+        flex-shrink: 0;
         height: 34px;
         padding-top: 4px;
         padding-bottom: 4px;

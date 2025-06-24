@@ -47,6 +47,7 @@
         --status-bar-height: 50px;
         --device-pane-width: 300px;
         --display-pane-width: 300px;
+        --recordings-width: 600px;
         --background-0: #000000;
         --background-1: #202020;
         --background-2: #282828;

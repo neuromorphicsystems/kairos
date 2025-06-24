@@ -33,8 +33,8 @@ class Evk4SamplesDecoder {
         },
     ) {
         const size = new Uint32Array(data.buffer, 0, 1)[0];
-        if (size === 44) {
-            const view = new DataView(data.buffer, 4, 40);
+        if (size === 60) {
+            const view = new DataView(data.buffer, 4, 60);
             const systemTime = view.getBigUint64(0, true);
             const systemTimestamp = view.getBigUint64(8, true);
             const onEventRate = view.getFloat32(16, true);
@@ -43,6 +43,10 @@ class Evk4SamplesDecoder {
             const fallingTriggerCount = view.getUint32(28, true);
             const illuminance = view.getFloat32(32, true);
             const temperature = view.getFloat32(36, true);
+            const autotriggerShortValue = view.getFloat32(40, true);
+            const autotriggerLongValue = view.getFloat32(44, true);
+            const autotriggerRatio = view.getFloat32(48, true);
+            const autotriggerThreshold = view.getFloat32(52, true);
             const date = new Date(Number(systemTime / 1000n));
             const secondsDeciseconds = `${date.getUTCSeconds().toString().padStart(2, "0")}.${Math.floor(date.getUTCMilliseconds() / 100).toFixed(0)}`;
             this.painter.push(
@@ -67,11 +71,17 @@ class Evk4SamplesDecoder {
                     [illuminance],
                     [temperature],
                     [risingTriggerCount, fallingTriggerCount],
+                    [
+                        autotriggerShortValue,
+                        autotriggerLongValue,
+                        autotriggerRatio,
+                        autotriggerThreshold,
+                    ],
                 ],
             );
         } else {
             console.error(
-                `EVK4 sample has an unexepcted size (${size} B, expected 44 B)`,
+                `EVK4 sample has an unexpected size (${size} B, expected 44 B)`,
             );
         }
         this.handleBuffer(data.streamId, data.sourceId, data.buffer);

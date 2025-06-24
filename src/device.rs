@@ -1,7 +1,9 @@
 use crate::constants;
 use crate::device;
+use crate::protocol;
 
 use neuromorphic_drivers::UsbDevice;
+use std::io::Write;
 
 const EVK4_ILLUMINANCE_ALPHA: f64 = 0.000000920554835579854387356562;
 const EVK4_ILLUMINANCE_BETA: f64 = -1.009776663165910859376594999048;
@@ -28,41 +30,19 @@ impl StreamId {
     }
 }
 
-#[derive(Default, PartialEq)]
-pub struct Lookback {
-    maximum_duration_us: u64,
-    maximum_size_bytes: usize,
-}
-
-#[derive(Default, PartialEq)]
-pub struct Autotrigger {
-    bin_duration_us: u64,
-    sliding_window_bins: usize,
-    threshold: f32,
-}
-
-#[derive(PartialEq)]
+#[derive(Clone)]
 pub enum RecordAction {
     Continue,
-    Start {
-        directory: std::path::PathBuf,
-        name: String,
-    },
+    Start(String),
     Stop,
 }
 
-impl Default for RecordAction {
-    fn default() -> Self {
-        Self::Continue
-    }
-}
-
-#[derive(Default)]
+#[derive(Clone)]
 pub struct RecordConfiguration {
-    pub autotrigger: Option<Autotrigger>,
-    pub autostop_us: Option<u64>,
-    pub lookback: Option<Lookback>,
     pub action: RecordAction,
+    pub lookback: protocol::Lookback,
+    pub autostop: protocol::Autostop,
+    pub autotrigger: protocol::Autotrigger,
 }
 
 #[derive(Default, Clone)]
@@ -72,14 +52,49 @@ struct LookbackBufferState {
     size_bytes: usize,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct FileState {
+    directory: std::path::PathBuf,
     name: String,
     duration_us: u64,
     size_bytes: usize,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Copy)]
+struct AutotriggerState {
+    short_value: f32,
+    long_value: f32,
+    ratio: f32,
+    threshold: f32,
+}
+
+impl AutotriggerState {
+    const fn byte_length() -> usize {
+        16
+    }
+
+    fn serialize_to(&self, buffer: &mut Vec<u8>) {
+        buffer.extend(&self.short_value.to_le_bytes()); // 4
+        buffer.extend(&self.long_value.to_le_bytes()); // 4
+        buffer.extend(&self.ratio.to_le_bytes()); // 4
+        buffer.extend(&self.threshold.to_le_bytes()); // 4
+    }
+}
+
+fn update_autotrigger_state(current: &mut Option<AutotriggerState>, new: AutotriggerState) {
+    match current {
+        Some(current) => {
+            current.short_value = new.short_value;
+            current.long_value = new.long_value;
+            current.ratio = current.ratio.max(new.ratio);
+            current.threshold = current.threshold.max(new.threshold);
+        }
+        None => {
+            let _ = current.replace(new);
+        }
+    }
+}
+
 struct EventThreadState {
     on_event_rate: f32,
     off_event_rate: f32,
@@ -87,19 +102,35 @@ struct EventThreadState {
     falling_trigger_count: u32,
     lookback_buffer_state: Option<LookbackBufferState>,
     file_state: Option<FileState>,
-    // @DEV add auto-trigger fields
+    autotrigger_state: Option<AutotriggerState>,
 }
 
+// Updates order
+// 1. DeviceProxy (visible to clients via the API) sets `record_configuration` to request record state changes.
+// 2. The "event thread" (the loop that calls `next_with_timeout`) periodically checks for changes to record_configuration
+// and updates `event_thread_state`.
+// 3. The "event thread" creates the metadata file (because the file name is not determined until step 2).
+// 4. The "sampler thread" (the loop that calls `illuminance`) periodically checks for changes to `event_thread_state`
+// and updates its recording state accordingly.
+
+#[derive(serde::Serialize, Clone)]
+pub struct Properties {
+    pub name: String,
+    pub serial: String,
+    pub speed: String,
+    pub bus_number: u8,
+    pub address: u8,
+}
 pub struct Device {
     id: DeviceId,
-    bus_number: u8,
-    address: u8,
+    properties: Properties,
     inner: std::sync::Arc<neuromorphic_drivers::Device>,
     flag:
         neuromorphic_drivers::Flag<neuromorphic_drivers::Error, neuromorphic_drivers::UsbOverflow>,
     record_configuration: std::sync::Arc<std::sync::Mutex<RecordConfiguration>>,
     event_thread_state: std::sync::Arc<std::sync::Mutex<EventThreadState>>,
     running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    configuration_changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct DeviceSampler {
@@ -111,13 +142,10 @@ pub struct DeviceSampler {
 
 pub struct DeviceProxy {
     pub id: DeviceId,
-    pub bus_number: u8,
-    pub address: u8,
-    pub serial: String,
-    pub speed: String,
+    pub properties: Properties,
     pub inner: std::sync::Arc<neuromorphic_drivers::Device>,
-    pub configuration: neuromorphic_drivers::Configuration,
     pub record_configuration: std::sync::Arc<std::sync::Mutex<RecordConfiguration>>,
+    pub configuration_changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -126,6 +154,7 @@ struct Davis346Sample {
     system_timestamp: u64,
     on_event_rate: f32,
     off_event_rate: f32,
+    autotrigger_state: AutotriggerState,
 }
 
 #[derive(Debug)]
@@ -134,6 +163,7 @@ struct Evk3HdSample {
     system_timestamp: u64,
     on_event_rate: f32,
     off_event_rate: f32,
+    autotrigger_state: AutotriggerState,
 }
 
 #[derive(Debug)]
@@ -146,17 +176,22 @@ struct Evk4Sample {
     falling_trigger_count: u32,
     illuminance: f32,
     temperature: f32,
+    autotrigger_state: AutotriggerState,
 }
 
+// @DEV needed for the index file
 fn serialize_state(state: &neuromorphic_drivers::adapters::State) {}
 
 struct LookbackBufferItem {
+    datetime: chrono::DateTime<chrono::Local>,
+    configuration: std::rc::Rc<neuromorphic_drivers::Configuration>,
     state: neuromorphic_drivers::adapters::State,
     end_t: u64,
     raw: Vec<u8>,
 }
 
 struct LookbackBuffer {
+    maximum_packet_size_bytes: usize,
     maximum_duration_us: u64,
     maximum_size_bytes: usize,
     duration_us: u64,
@@ -164,35 +199,140 @@ struct LookbackBuffer {
     read_index: usize,
     write_index: usize,
     items: Vec<LookbackBufferItem>,
+    default_state: neuromorphic_drivers::adapters::State,
+    current_configuration: std::rc::Rc<neuromorphic_drivers::Configuration>,
+}
+
+fn unwrap_non_empty_lookback(lookback_buffer: &Option<LookbackBuffer>) -> Option<&LookbackBuffer> {
+    match lookback_buffer {
+        Some(lookback_buffer) => {
+            if lookback_buffer.read_index == lookback_buffer.write_index {
+                None
+            } else {
+                Some(lookback_buffer)
+            }
+        }
+        None => None,
+    }
 }
 
 impl LookbackBuffer {
-    fn resize(&mut self, new_length: usize) {
-        let mut new_items = Vec::with_capacity(new_length);
-        let count = (new_length - 1)
+    fn new(
+        maximum_duration_us: u64,
+        maximum_size_bytes: usize,
+        maximum_packet_size_bytes: usize,
+        default_state: neuromorphic_drivers::adapters::State,
+        current_configuration: neuromorphic_drivers::Configuration,
+    ) -> Self {
+        let current_configuration = std::rc::Rc::new(current_configuration);
+        let items_length = maximum_size_bytes / maximum_packet_size_bytes;
+        let mut items = Vec::with_capacity(items_length);
+        for _ in 0..items_length {
+            items.push(LookbackBufferItem {
+                datetime: chrono::DateTime::default(),
+                configuration: current_configuration.clone(),
+                state: default_state,
+                end_t: 0,
+                raw: Vec::new(),
+            });
+        }
+        Self {
+            maximum_packet_size_bytes,
+            maximum_duration_us,
+            maximum_size_bytes,
+            duration_us: 0,
+            size_bytes: 0,
+            read_index: 0,
+            write_index: 0,
+            items,
+            default_state,
+            current_configuration,
+        }
+    }
+
+    fn update_maximum_duration_us(&mut self, new_maximum_duration_us: u64) {
+        self.maximum_duration_us = new_maximum_duration_us;
+        if self.read_index != self.write_index {
+            let end_t =
+                self.items[(self.write_index + self.items.len() - 1) % self.items.len()].end_t;
+            while (self.read_index + 1) % self.items.len() != self.write_index {
+                if end_t - self.items[self.read_index].end_t < self.maximum_duration_us {
+                    break;
+                }
+                self.size_bytes -= self.items[self.read_index].raw.len();
+                self.read_index = (self.read_index + 1) % self.items.len();
+            }
+            self.duration_us =
+                self.items[(self.write_index + self.items.len() - 1) % self.items.len()].end_t
+                    - self.items[self.read_index].state.current_t();
+        }
+    }
+
+    fn update_maximum_size_bytes(&mut self, new_maximum_size_bytes: usize) {
+        self.maximum_size_bytes = new_maximum_size_bytes;
+        let new_items_length = new_maximum_size_bytes / self.maximum_packet_size_bytes;
+        let mut new_items = Vec::with_capacity(new_items_length);
+        let count = (new_items_length - 1)
             .min((self.write_index + self.items.len() - self.read_index) % self.items.len());
         let mut index = (self.write_index + self.items.len() - count) % self.items.len();
+        self.size_bytes = 0;
         while index != self.write_index {
             let mut new_item = LookbackBufferItem {
+                datetime: self.items[index].datetime,
                 state: self.items[index].state,
                 end_t: self.items[index].end_t,
                 raw: Vec::new(),
+                configuration: self.items[index].configuration.clone(),
             };
             std::mem::swap(&mut self.items[index].raw, &mut new_item.raw);
+            self.size_bytes += new_item.raw.len();
             new_items.push(new_item);
             index = (index + 1) % self.items.len();
         }
+        while new_items.len() < new_items_length {
+            new_items.push(LookbackBufferItem {
+                datetime: chrono::DateTime::default(),
+                configuration: self.current_configuration.clone(),
+                state: self.default_state,
+                end_t: 0,
+                raw: Vec::new(),
+            });
+        }
         std::mem::swap(&mut self.items, &mut new_items);
+        self.read_index = 0;
+        self.write_index = count;
+        // no need to trim for duration because update_maximum_duration_us is
+        // always called first (when needed) during a configuration update
+        if self.read_index == self.write_index {
+            self.duration_us = 0;
+        } else {
+            self.duration_us =
+                self.items[(self.write_index + self.items.len() - 1) % self.items.len()].end_t
+                    - self.items[self.read_index].state.current_t();
+        }
     }
 
-    fn push(&mut self, state: &neuromorphic_drivers::adapters::State, end_t: u64, buffer: &[u8]) {
-        self.items[self.write_index].state = state.clone();
+    fn push(
+        &mut self,
+        datetime: chrono::DateTime<chrono::Local>,
+        state: neuromorphic_drivers::adapters::State,
+        end_t: u64,
+        buffer: &[u8],
+        current_configuration: Option<neuromorphic_drivers::Configuration>,
+    ) {
+        self.items[self.write_index].datetime = datetime;
+        self.items[self.write_index].state = state;
         self.items[self.write_index].end_t = end_t;
         self.items[self.write_index].raw.resize(buffer.len(), 0);
         self.items[self.write_index].raw.copy_from_slice(buffer);
+        if let Some(current_configuration) = current_configuration {
+            self.current_configuration = std::rc::Rc::new(current_configuration);
+        }
+        self.items[self.write_index].configuration = self.current_configuration.clone();
         self.size_bytes += buffer.len();
         self.write_index = (self.write_index + 1) % self.items.len();
         if self.write_index == self.read_index {
+            self.size_bytes -= self.items[self.read_index].raw.len();
             self.read_index = (self.read_index + 1) % self.items.len();
         }
         while (self.read_index + 1) % self.items.len() != self.write_index {
@@ -202,7 +342,7 @@ impl LookbackBuffer {
             self.size_bytes -= self.items[self.read_index].raw.len();
             self.read_index = (self.read_index + 1) % self.items.len();
         }
-        self.duration_us = end_t - self.items[self.read_index].end_t;
+        self.duration_us = end_t - self.items[self.read_index].state.current_t();
     }
 
     fn state(&self) -> LookbackBufferState {
@@ -224,9 +364,9 @@ enum Sample {
 impl Sample {
     fn byte_length(&self) -> usize {
         match self {
-            Sample::Davis346(_) => 24,
-            Sample::Evk3HdSample(_) => 24,
-            Sample::Evk4Sample(_) => 40,
+            Sample::Davis346(_) => 24 + AutotriggerState::byte_length(),
+            Sample::Evk3HdSample(_) => 24 + AutotriggerState::byte_length(),
+            Sample::Evk4Sample(_) => 40 + AutotriggerState::byte_length(),
         }
     }
 
@@ -237,12 +377,14 @@ impl Sample {
                 buffer.extend(&davis346_sample.system_timestamp.to_le_bytes()); // 8
                 buffer.extend(&davis346_sample.on_event_rate.to_le_bytes()); // 4
                 buffer.extend(&davis346_sample.off_event_rate.to_le_bytes()); // 4
+                davis346_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
             }
             Sample::Evk3HdSample(evk3_hd_sample) => {
                 buffer.extend(&evk3_hd_sample.system_time.to_le_bytes()); // 8
                 buffer.extend(&evk3_hd_sample.system_timestamp.to_le_bytes()); // 8
                 buffer.extend(&evk3_hd_sample.on_event_rate.to_le_bytes()); // 4
                 buffer.extend(&evk3_hd_sample.off_event_rate.to_le_bytes()); // 4
+                evk3_hd_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
             }
             Sample::Evk4Sample(evk4_sample) => {
                 buffer.extend(&evk4_sample.system_time.to_le_bytes()); // 8
@@ -253,16 +395,19 @@ impl Sample {
                 buffer.extend(&evk4_sample.falling_trigger_count.to_le_bytes()); // 4
                 buffer.extend(&evk4_sample.illuminance.to_le_bytes()); // 4
                 buffer.extend(&evk4_sample.temperature.to_le_bytes()); // 4
+                evk4_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
             }
         }
     }
 }
 
 fn serialize_record_state_to(
+    device_id: DeviceId,
     lookback_buffer_state: &Option<LookbackBufferState>,
-    file_state: &Option<FileState>,
+    name_and_duration_us_and_size_bytes: &Option<(String, u64, usize)>,
     buffer: &mut Vec<u8>,
 ) {
+    buffer.extend_from_slice(&device_id.0.to_le_bytes()); // 4
     match lookback_buffer_state {
         Some(lookback_buffer_state) => {
             buffer.push(1); // 1
@@ -276,12 +421,12 @@ fn serialize_record_state_to(
             buffer.extend_from_slice(&(0u64).to_le_bytes()); // 8
         }
     }
-    match file_state {
-        Some(file_state) => {
+    match name_and_duration_us_and_size_bytes {
+        Some(name_and_duration_us_and_size_bytes) => {
             buffer.push(1); // 1
-            buffer.extend_from_slice(&file_state.duration_us.to_le_bytes()); // 8
-            buffer.extend_from_slice(&file_state.size_bytes.to_le_bytes()); // 8
-            buffer.extend_from_slice(file_state.name.as_bytes());
+            buffer.extend_from_slice(&name_and_duration_us_and_size_bytes.1.to_le_bytes()); // 8
+            buffer.extend_from_slice(&name_and_duration_us_and_size_bytes.2.to_le_bytes()); // 8
+            buffer.extend_from_slice(name_and_duration_us_and_size_bytes.0.as_bytes());
         }
         None => {
             buffer.push(0); // 1
@@ -291,55 +436,607 @@ fn serialize_record_state_to(
     }
 }
 
-impl Device {
-    pub fn create_device_and_proxies(
-        id: DeviceId,
-        listed_device: neuromorphic_drivers::devices::ListedDevice,
-        device: neuromorphic_drivers::Device,
-        flag: neuromorphic_drivers::Flag<
-            neuromorphic_drivers::Error,
-            neuromorphic_drivers::UsbOverflow,
-        >,
-    ) -> (Device, DeviceSampler, DeviceProxy) {
-        let configuration = device.default_configuration();
-        let record_configuration =
-            std::sync::Arc::new(std::sync::Mutex::new(RecordConfiguration::default()));
-        let event_thread_state =
-            std::sync::Arc::new(std::sync::Mutex::new(EventThreadState::default()));
-        let inner = std::sync::Arc::new(device);
-        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        (
-            Self {
-                id,
-                bus_number: listed_device.bus_number,
-                address: listed_device.address,
-                inner: inner.clone(),
-                flag,
-                record_configuration: record_configuration.clone(),
-                event_thread_state: event_thread_state.clone(),
-                running: running.clone(),
-            },
-            DeviceSampler {
-                id,
-                inner: inner.clone(),
-                event_thread_state,
-                running,
-            },
-            DeviceProxy {
-                id,
-                bus_number: listed_device.bus_number,
-                address: listed_device.address,
-                serial: listed_device
-                    .serial
-                    .expect("Device::new is given a valid listed_device"),
-                speed: listed_device.speed.to_string(),
-                inner,
-                configuration,
-                record_configuration,
-            },
-        )
+struct Recording {
+    directory: std::path::PathBuf,
+    name: String,
+    raw_file: Option<std::io::BufWriter<std::fs::File>>,
+    raw_file_error: bool,
+    raw_file_offset: usize,
+    index_file: Option<std::io::BufWriter<std::fs::File>>,
+    index_file_error: bool,
+    metadata_file: Option<std::io::BufWriter<std::fs::File>>,
+    metadata_file_error: bool,
+    start_t: u64,
+    size_bytes: usize,
+}
+
+struct SamplerRecording {
+    directory: std::path::PathBuf,
+    name: String,
+    samples_file: Option<std::io::BufWriter<std::fs::File>>,
+    samples_file_error: bool,
+    size_bytes: usize,
+}
+
+fn write_all_count(
+    file: &mut std::io::BufWriter<std::fs::File>,
+    mut buffer: &[u8],
+) -> (usize, std::io::Result<()>) {
+    let mut written = 0;
+    while !buffer.is_empty() {
+        match file.write(buffer) {
+            Ok(0) => {
+                return (
+                    written,
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    )),
+                );
+            }
+            Ok(length) => {
+                written += length;
+                buffer = &buffer[length..]
+            }
+            Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return (written, Err(error)),
+        }
+    }
+    (written, Ok(()))
+}
+
+fn raw_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
+    directory.join(format!(
+        "{}.raw.kai{}",
+        name,
+        if write { ".write" } else { "" }
+    ))
+}
+
+fn index_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
+    directory.join(format!(
+        "{}.index.kai{}",
+        name,
+        if write { ".write" } else { "" }
+    ))
+}
+
+fn metadata_file_path(
+    directory: &std::path::PathBuf,
+    name: &str,
+    write: bool,
+) -> std::path::PathBuf {
+    directory.join(format!(
+        "{}.toml{}",
+        name,
+        if write { ".write" } else { "" }
+    ))
+}
+
+fn samples_file_path(
+    directory: &std::path::PathBuf,
+    name: &str,
+    write: bool,
+) -> std::path::PathBuf {
+    directory.join(format!(
+        "{}.samples.kai{}",
+        name,
+        if write { ".write" } else { "" }
+    ))
+}
+
+#[derive(serde::Serialize)]
+struct Autotrigger {
+    timestamp: String,
+    short_sliding_window: usize,
+    long_sliding_window: usize,
+    threshold: f32,
+}
+
+enum Trigger {
+    Manual(String),
+    Auto(Autotrigger),
+}
+
+macro_rules! register {
+    ($($module:ident),+) => {
+        paste::paste! {
+            $(
+                #[derive(serde::Serialize)]
+                struct [<$module:camel Configuration>]<'a> {
+                    configuration: &'a neuromorphic_drivers::$module::Configuration,
+                }
+            )+
+
+            $(
+                #[derive(serde::Serialize)]
+                struct [<$module:camel ConfigurationUpdate>]<'a> {
+                    timestamp: String,
+                    configuration: &'a neuromorphic_drivers::$module::Configuration,
+                }
+            )+
+
+            $(
+                #[derive(serde::Serialize)]
+                struct [<$module:camel ConfigurationUpdates>]<'a> {
+                    configuration_updates: [&'a [<$module:camel ConfigurationUpdate>]<'a>; 1],
+                }
+            )+
+
+            fn configuration_to_toml(configuration: &neuromorphic_drivers::Configuration) -> String {
+                match configuration {
+                    $(
+                        neuromorphic_drivers::Configuration::[<$module:camel>](configuration) => {
+                            toml::to_string(&[<$module:camel Configuration>] {
+                                configuration,
+                            }).expect("TOML serialization failed")
+                        }
+                    )+
+                }
+            }
+
+            fn configuration_update_to_toml(
+                datetime: &chrono::DateTime<chrono::Local>,
+                configuration: &neuromorphic_drivers::Configuration
+            ) -> String {
+                match configuration {
+                    $(
+                        neuromorphic_drivers::Configuration::[<$module:camel>](configuration) => {
+                            format!(
+                                "\n\n{}",
+                                toml::to_string(&[<$module:camel ConfigurationUpdates>] {
+                                    configuration_updates: [&[<$module:camel ConfigurationUpdate>] {
+                                        timestamp: crate::utc_string(datetime),
+                                        configuration,
+                                    }],
+                                }).expect("TOML serialization failed")
+                            )
+                        }
+                    )+
+                }
+            }
+        }
+    }
+}
+
+register! { inivation_davis346, prophesee_evk3_hd, prophesee_evk4 }
+
+impl Recording {
+    // An adapter's internal variables are split into "constants" and "variables" (state)
+    // The constants are either immutable but needed for decoding (like width and height),
+    // or too big to be appended to buffers (like frames in a DAVIS).
+    // The current adapter can be passed to new (pseudo-constants like frames are not persisted),
+    // but the state must match the first buffer (the distinction matters for lookback data).
+    fn new(
+        directory: std::path::PathBuf,
+        name: String,
+        datetime: &chrono::DateTime<chrono::Local>,
+        trigger: Trigger,
+        adapter: &neuromorphic_drivers::adapters::Adapter,
+        state: &neuromorphic_drivers::adapters::State,
+        properties: &Properties,
+        configuration: &neuromorphic_drivers::Configuration,
+    ) -> Result<Recording, std::io::Error> {
+        let mut size_bytes = 0;
+        let mut raw_file = std::io::BufWriter::new(std::fs::File::create(raw_file_path(
+            &directory, &name, true,
+        ))?);
+        // 0 is the file version number (not a string terminator)
+        raw_file.write_all(b"KAIROS-RAW\0")?;
+        match adapter {
+            neuromorphic_drivers::adapters::Adapter::Davis346(adapter) => todo!(),
+            neuromorphic_drivers::adapters::Adapter::Evt3(adapter) => {
+                // format id (0 is EVT3)
+                raw_file.write_all(b"\0")?;
+                raw_file.write_all(&(30_u32.to_le_bytes()))?;
+                raw_file.write_all(&(adapter.width().to_be_bytes()))?; // 2
+                raw_file.write_all(&(adapter.height().to_be_bytes()))?; // 2
+                match state {
+                    neuromorphic_drivers::adapters::State::Davis346(_) => {
+                        panic!("adapter and state mismatch")
+                    }
+                    neuromorphic_drivers::adapters::State::Evt3(state) => {
+                        raw_file.write_all(&(state.t.to_le_bytes()))?; // 8
+                        raw_file.write_all(&(state.overflows.to_le_bytes()))?; // 4
+                        raw_file.write_all(&(state.previous_msb_t.to_le_bytes()))?; // 4
+                        raw_file.write_all(&(state.previous_lsb_t.to_le_bytes()))?; // 4
+                        raw_file.write_all(&(state.x.to_le_bytes()))?; // 2
+                        raw_file.write_all(&(state.y.to_le_bytes()))?; // 2
+                        raw_file.write_all(&(state.polarity as u16).to_le_bytes())?;
+                        // 2
+                    }
+                };
+            }
+        }
+        let raw_file_offset = 42;
+        size_bytes += raw_file_offset;
+        let mut index_file = std::io::BufWriter::new(std::fs::File::create(index_file_path(
+            &directory, &name, true,
+        ))?);
+        // 0 is the file version number (not a string terminator)
+        index_file.write_all(b"KAIROS-INDEX\0")?;
+        match adapter {
+            neuromorphic_drivers::adapters::Adapter::Davis346(_) => todo!(),
+            neuromorphic_drivers::adapters::Adapter::Evt3(_) => {
+                // format id (0 is EVT3)
+                raw_file.write_all(b"\0")?;
+            }
+        }
+        size_bytes += 14;
+        let mut metadata_file = std::io::BufWriter::new(std::fs::File::create(
+            metadata_file_path(&directory, &name, true),
+        )?);
+        {
+            let datetime_string = format!("timestamp = \"{}\"\n\n", crate::utc_string(datetime));
+            metadata_file.write_all(datetime_string.as_bytes())?;
+            size_bytes += datetime_string.len();
+        }
+        {
+            let trigger_string = format!(
+                "[trigger]\nmode = \"{}\"\n{}\n",
+                match trigger {
+                    Trigger::Manual(_) => "manual",
+                    Trigger::Auto(_) => "auto",
+                },
+                match trigger {
+                    Trigger::Manual(datetime) => format!("timestamp = \"{datetime}\"\n"),
+                    Trigger::Auto(autotrigger) =>
+                        toml::to_string(&autotrigger).expect("TOML serialization failed"),
+                },
+            );
+            metadata_file.write_all(trigger_string.as_bytes())?;
+            size_bytes += trigger_string.len();
+        }
+        {
+            let properties_string = format!(
+                "[device]\n{}\n",
+                toml::to_string(&properties).expect("TOML serialization failed")
+            );
+            metadata_file.write_all(properties_string.as_bytes())?;
+            size_bytes += properties_string.len();
+        }
+        {
+            let configuration_string = configuration_to_toml(configuration);
+            metadata_file.write_all(configuration_string.as_bytes())?;
+            size_bytes += configuration_string.len();
+        }
+
+        // @DEV write properties
+        // @DEV write configuration
+        size_bytes += 0; // @DEV should be the number of bytes written to .toml.write
+        Ok(Recording {
+            directory,
+            name,
+            raw_file: Some(raw_file),
+            raw_file_error: false,
+            raw_file_offset,
+            index_file: Some(index_file),
+            index_file_error: false,
+            metadata_file: Some(metadata_file),
+            metadata_file_error: false,
+            start_t: state.current_t(),
+            size_bytes,
+        })
     }
 
+    fn update_file_state(&self, current_t: u64, file_state: &mut Option<FileState>) {
+        match file_state {
+            Some(file_state) => {
+                if file_state.directory != self.directory {
+                    file_state.directory = self.directory.clone();
+                }
+                if file_state.name != self.name {
+                    file_state.name = self.name.clone();
+                }
+                file_state.duration_us = current_t.max(self.start_t) - self.start_t;
+                file_state.size_bytes = self.size_bytes;
+            }
+            None => {
+                let _ = file_state.replace(FileState {
+                    directory: self.directory.clone(),
+                    name: self.name.clone(),
+                    duration_us: current_t.max(self.start_t) - self.start_t,
+                    size_bytes: self.size_bytes,
+                });
+            }
+        }
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        let _ = self.raw_file.take();
+        let _ = std::fs::rename(
+            raw_file_path(&self.directory, &self.name, true),
+            raw_file_path(&self.directory, &self.name, false),
+        );
+        let _ = self.index_file.take();
+        let _ = std::fs::rename(
+            index_file_path(&self.directory, &self.name, true),
+            index_file_path(&self.directory, &self.name, false),
+        );
+
+        let _ = self.metadata_file.take();
+        let _ = std::fs::rename(
+            metadata_file_path(&self.directory, &self.name, true),
+            metadata_file_path(&self.directory, &self.name, false),
+        );
+    }
+}
+
+fn create_new_recording(
+    lookback_buffer: &Option<LookbackBuffer>,
+    now: &chrono::DateTime<chrono::Local>,
+    name: &str,
+    adapter: &neuromorphic_drivers::Adapter,
+    properties: &Properties,
+    new_configuration: &Option<neuromorphic_drivers::Configuration>,
+    device: &neuromorphic_drivers::Device,
+    event_thread_state: &std::sync::Arc<std::sync::Mutex<EventThreadState>>,
+    context: &std::sync::Arc<tokio::sync::Mutex<crate::Context>>,
+    autostop_reference_t: &mut u64,
+    trigger: Trigger,
+) -> Option<Recording> {
+    let directory = {
+        let mut context_guard = context.blocking_lock();
+        let directory = std::path::PathBuf::from(&context_guard.shared_client_state.data_directory)
+            .join("recordings");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            context_guard.shared_client_state.errors.push(format!(
+                "Creating \"{}\" failed ({})",
+                directory.to_string_lossy(),
+                error
+            ));
+            return None;
+        }
+        directory
+    };
+    let datetime = match unwrap_non_empty_lookback(lookback_buffer) {
+        Some(lookback_buffer) => &lookback_buffer.items[lookback_buffer.read_index].datetime,
+        None => now,
+    };
+    let timestamp = crate::utc_string_path_safe(datetime);
+    let name = if name.is_empty() {
+        timestamp
+    } else {
+        format!("{timestamp}_{name}")
+    };
+    let new_recording = match unwrap_non_empty_lookback(&lookback_buffer) {
+        Some(lookback_buffer) => Recording::new(
+            directory.clone(),
+            name.clone(),
+            datetime,
+            trigger,
+            adapter,
+            &lookback_buffer.items[lookback_buffer.read_index].state,
+            properties,
+            &lookback_buffer.items[lookback_buffer.read_index].configuration,
+        ),
+        None => Recording::new(
+            directory.clone(),
+            name.clone(),
+            datetime,
+            trigger,
+            &adapter,
+            &adapter.state(),
+            properties,
+            &match new_configuration.as_ref() {
+                Some(new_configuration) => new_configuration.clone(),
+                None => device.current_configuration(),
+            },
+        ),
+    };
+    match new_recording {
+        Ok(mut new_recording) => {
+            {
+                let mut event_thread_state_guard = event_thread_state
+                    .lock()
+                    .expect("event thread state mutex is poisoned");
+                new_recording.update_file_state(
+                    adapter.current_t(),
+                    &mut event_thread_state_guard.file_state,
+                );
+            }
+            if let Some(lookback_buffer) = unwrap_non_empty_lookback(&lookback_buffer) {
+                if let Some(raw_file) = new_recording.raw_file.as_mut() {
+                    let mut index = lookback_buffer.read_index;
+                    while index != lookback_buffer.write_index {
+                        let raw_file_offset = new_recording.raw_file_offset;
+                        let (count, result) =
+                            write_all_count(raw_file, &lookback_buffer.items[index].raw);
+                        new_recording.raw_file_offset += count;
+                        new_recording.size_bytes += count;
+                        if let Err(error) = result {
+                            if !new_recording.raw_file_error {
+                                new_recording.raw_file_error = true;
+                                context
+                                    .blocking_lock()
+                                    .shared_client_state
+                                    .errors
+                                    .push(format!(
+                                        "Writing to \"{}\" failed ({})",
+                                        raw_file_path(
+                                            &new_recording.directory,
+                                            &new_recording.name,
+                                            true
+                                        )
+                                        .to_string_lossy(),
+                                        error
+                                    ));
+                            }
+                        }
+                        // @DEV write the following to the index file:
+                        // - raw_file_offset
+                        // - previous_state
+                        // - usb timings
+                        // - whether this is the first packet after a clutch
+
+                        // @DEV write the following to the metadata file
+                        // if the configuration is different from the current conf,
+                        // add it to the metadata file
+                        index = (index + 1) % lookback_buffer.items.len();
+                    }
+                }
+            }
+            *autostop_reference_t = adapter.current_t();
+            Some(new_recording)
+        }
+        Err(error) => {
+            context
+                .blocking_lock()
+                .shared_client_state
+                .errors
+                .push(format!(
+                    "Creating \"{}\" failed ({})",
+                    directory.join(name).to_string_lossy(),
+                    error
+                ));
+            None
+        }
+    }
+}
+
+impl SamplerRecording {
+    fn new(
+        directory: std::path::PathBuf,
+        name: String,
+        format_type: u8,
+    ) -> Result<SamplerRecording, std::io::Error> {
+        let mut size_bytes = 0;
+        let mut samples_file = std::io::BufWriter::new(std::fs::File::create(samples_file_path(
+            &directory, &name, true,
+        ))?);
+        // 0 is the file version number (not a string terminator)
+        samples_file.write_all(b"KAIROS-SAMPLES\0")?;
+        samples_file.write_all(&[format_type])?;
+        size_bytes += 16;
+        Ok(SamplerRecording {
+            directory,
+            name,
+            samples_file: Some(samples_file),
+            samples_file_error: false,
+            size_bytes,
+        })
+    }
+}
+
+impl Drop for SamplerRecording {
+    fn drop(&mut self) {
+        let _ = self.samples_file.take();
+        let _ = std::fs::rename(
+            samples_file_path(&self.directory, &self.name, true),
+            samples_file_path(&self.directory, &self.name, false),
+        );
+    }
+}
+
+struct AutotriggerMovingWindow {
+    log_values: [f64; constants::AUTOTRIGGER_MAXIMUM_WINDOW_SIZE],
+    write_index: usize,
+    actual_length: usize,
+}
+
+impl AutotriggerMovingWindow {
+    fn new() -> Self {
+        Self {
+            log_values: [0.0; constants::AUTOTRIGGER_MAXIMUM_WINDOW_SIZE],
+            write_index: 0,
+            actual_length: 0,
+        }
+    }
+
+    fn push(&mut self, value: f64) {
+        self.log_values[self.write_index] = value.ln();
+        self.write_index = (self.write_index + 1) % self.log_values.len();
+        if self.actual_length < self.log_values.len() {
+            self.actual_length += 1;
+        }
+    }
+
+    fn mean(&self, length: usize) -> f64 {
+        if self.actual_length == 0 {
+            0.0
+        } else {
+            let length = length.min(self.actual_length);
+            let mut index =
+                (self.write_index + self.log_values.len() - length) % self.log_values.len();
+            let mut total: f64 = 0.0;
+            loop {
+                total += self.log_values[index];
+                index = (index + 1) % self.log_values.len();
+                if index == self.write_index {
+                    break;
+                }
+            }
+            (total / length as f64).exp()
+        }
+    }
+}
+
+pub fn create_device_and_proxies(
+    id: DeviceId,
+    listed_device: neuromorphic_drivers::devices::ListedDevice,
+    device: neuromorphic_drivers::Device,
+    flag: neuromorphic_drivers::Flag<
+        neuromorphic_drivers::Error,
+        neuromorphic_drivers::UsbOverflow,
+    >,
+) -> (Device, DeviceSampler, DeviceProxy) {
+    let record_configuration = std::sync::Arc::new(std::sync::Mutex::new(RecordConfiguration {
+        action: RecordAction::Continue,
+        lookback: protocol::Lookback::default(),
+        autostop: protocol::Autostop::default(),
+        autotrigger: protocol::Autotrigger::default(),
+    }));
+    let event_thread_state = std::sync::Arc::new(std::sync::Mutex::new(EventThreadState {
+        on_event_rate: 0.0,
+        off_event_rate: 0.0,
+        rising_trigger_count: 0,
+        falling_trigger_count: 0,
+        lookback_buffer_state: None,
+        file_state: None,
+        autotrigger_state: None,
+    }));
+    let inner = std::sync::Arc::new(device);
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let configuration_changed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let properties = Properties {
+        name: listed_device.device_type.name().to_owned(),
+        serial: listed_device
+            .serial
+            .expect("Device::new is given a valid listed_device"),
+        speed: listed_device.speed.to_string(),
+        bus_number: listed_device.bus_number,
+        address: listed_device.address,
+    };
+    (
+        Device {
+            id,
+            properties: properties.clone(),
+            inner: inner.clone(),
+            flag,
+            record_configuration: record_configuration.clone(),
+            event_thread_state: event_thread_state.clone(),
+            running: running.clone(),
+            configuration_changed: configuration_changed.clone(),
+        },
+        DeviceSampler {
+            id,
+            inner: inner.clone(),
+            event_thread_state: event_thread_state.clone(),
+            running,
+        },
+        DeviceProxy {
+            id,
+            properties,
+            inner,
+            record_configuration,
+            configuration_changed,
+        },
+    )
+}
+
+impl Device {
     pub fn run(self, context: std::sync::Arc<tokio::sync::Mutex<crate::Context>>) {
         let stream_id = StreamId::new(self.id, 0);
         let (time_reference, router, stack) = {
@@ -350,9 +1047,7 @@ impl Device {
                 context_guard.packet_stack.clone(),
             )
         };
-        let mut record_configuration = RecordConfiguration::default();
-        let mut raw_file: Option<std::io::BufWriter<std::fs::File>> = None;
-        let mut index_file: Option<std::io::BufWriter<std::fs::File>> = None;
+        let mut recording: Option<Recording> = None;
         let mut adapter = self.inner.create_adapter();
         let mut data_buffer = Vec::new();
         let mut data_buffer_start_state = adapter.state();
@@ -369,10 +1064,12 @@ impl Device {
         let mut off_event_rate = 0.0;
 
         let mut lookback_buffer: Option<LookbackBuffer> = None;
+        let mut autostop_reference_t: u64 = 0;
+        let mut autotrigger_moving_window = AutotriggerMovingWindow::new();
 
         loop {
+            // break on error
             if let Err(error) = self.flag.load_error() {
-                println!("device error: {error:?}"); // @DEV
                 self.running
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 let mut context_guard = context.blocking_lock();
@@ -380,10 +1077,136 @@ impl Device {
                 context_guard.update_shared_client_state_devices();
                 break;
             }
-            if let Some(buffer_view) = self
+
+            // read the next camera buffer
+            let buffer_view = self
                 .inner
-                .next_with_timeout(&std::time::Duration::from_millis(100))
+                .next_with_timeout(&std::time::Duration::from_millis(100));
+
+            // read the record configuration
+            let now = chrono::Local::now();
+            let (record_action, new_lookback, autostop, autotrigger) = {
+                let mut record_configuration_guard = self
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                let record_action = record_configuration_guard.action.clone();
+                record_configuration_guard.action = RecordAction::Continue;
+                (
+                    record_action,
+                    record_configuration_guard.lookback,
+                    record_configuration_guard.autostop,
+                    record_configuration_guard.autotrigger,
+                )
+            };
+
+            // read the camera configuration if it changed
+            let new_configuration = if self
+                .configuration_changed
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
             {
+                Some(self.inner.current_configuration())
+            } else {
+                None
+            };
+
+            // write configuration updates to the metadata file
+            if let Some(recording) = recording.as_mut() {
+                if let Some(metadata_file) = recording.metadata_file.as_mut() {
+                    if let Some(new_configuration) = new_configuration.as_ref() {
+                        let configuration_string =
+                            configuration_update_to_toml(&chrono::Local::now(), new_configuration);
+                        let (count, result) =
+                            write_all_count(metadata_file, configuration_string.as_bytes());
+                        recording.size_bytes += count;
+                        if let Err(error) = result {
+                            if !recording.metadata_file_error {
+                                recording.metadata_file_error = true;
+                                context
+                                    .blocking_lock()
+                                    .shared_client_state
+                                    .errors
+                                    .push(format!(
+                                        "Writing to \"{}\" failed ({})",
+                                        metadata_file_path(
+                                            &recording.directory,
+                                            &recording.name,
+                                            true
+                                        )
+                                        .to_string_lossy(),
+                                        error
+                                    ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // start a new recording (manual trigger)
+            match record_action {
+                RecordAction::Continue => {}
+                RecordAction::Start(name) => {
+                    let _ = recording.take();
+                    if let Some(new_recording) = create_new_recording(
+                        &lookback_buffer,
+                        &now,
+                        &name,
+                        &adapter,
+                        &self.properties,
+                        &new_configuration,
+                        &self.inner,
+                        &self.event_thread_state,
+                        &context,
+                        &mut autostop_reference_t,
+                        Trigger::Manual(crate::utc_string(&now)),
+                    ) {
+                        recording.replace(new_recording);
+                    }
+                }
+                RecordAction::Stop => {
+                    let _ = recording.take();
+                }
+            }
+
+            // update the lookback buffer's configuration if it changed
+            if new_lookback.enabled {
+                match lookback_buffer.as_mut() {
+                    Some(lookback_buffer) => {
+                        if lookback_buffer.maximum_duration_us != new_lookback.maximum_duration_us {
+                            lookback_buffer
+                                .update_maximum_duration_us(new_lookback.maximum_duration_us);
+                        }
+                        if lookback_buffer.maximum_size_bytes != new_lookback.maximum_size_bytes {
+                            lookback_buffer
+                                .update_maximum_size_bytes(new_lookback.maximum_size_bytes);
+                        }
+                    }
+                    None => {
+                        lookback_buffer.replace(LookbackBuffer::new(
+                                new_lookback.maximum_duration_us,
+                                new_lookback.maximum_size_bytes,
+                                match self.inner.as_ref() {
+                                    neuromorphic_drivers::Device::InivationDavis346(_) => {
+                                        neuromorphic_drivers::inivation_davis346::DEFAULT_USB_CONFIGURATION.buffer_length
+                                    },
+                                    neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
+                                        neuromorphic_drivers::prophesee_evk3_hd::DEFAULT_USB_CONFIGURATION.buffer_length
+                                    },
+                                    neuromorphic_drivers::Device::PropheseeEvk4(_) => {
+                                        neuromorphic_drivers::prophesee_evk4::DEFAULT_USB_CONFIGURATION.buffer_length
+                                    },
+                                },
+                                adapter.state(),
+                                self.inner.current_configuration(),
+                            ));
+                    }
+                }
+            } else {
+                let _ = lookback_buffer.take();
+            }
+
+            // build 1/60s event packets and calculate event rates
+            if let Some(buffer_view) = buffer_view {
                 let system_time = buffer_view
                     .system_time
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -395,6 +1218,8 @@ impl Device {
                     .as_micros() as u64;
                 let mut rising_trigger_count = 0;
                 let mut falling_trigger_count = 0;
+                let previous_state = adapter.state();
+                let mut autotrigger_state: Option<AutotriggerState> = None;
                 loop {
                     let (events_lengths, position) =
                         adapter.events_lengths_until(buffer_view.slice, data_buffer_end_t);
@@ -413,6 +1238,7 @@ impl Device {
                         }
                     }
                     if position / 2 < buffer_view.slice.len() / 2 {
+                        // update the event rate (graph display)
                         event_rate_on_samples[event_rate_index] =
                             data_buffer_on_event_count as f64 * constants::PACKET_FREQUENCY;
                         event_rate_off_samples[event_rate_index] =
@@ -426,17 +1252,41 @@ impl Device {
                                 / constants::EVENT_RATE_SAMPLES as f64)
                                 as f32;
                         }
+
+                        // update the event rate (auto-trigger)
+                        autotrigger_moving_window.push(
+                            (data_buffer_on_event_count + data_buffer_off_event_count) as f64
+                                * constants::PACKET_FREQUENCY,
+                        );
+                        {
+                            let short_value =
+                                autotrigger_moving_window.mean(autotrigger.short_sliding_window);
+                            let long_value =
+                                autotrigger_moving_window.mean(autotrigger.long_sliding_window);
+                            let ratio = if long_value == 0.0 {
+                                1.0
+                            } else {
+                                short_value / long_value
+                            };
+                            update_autotrigger_state(
+                                &mut autotrigger_state,
+                                AutotriggerState {
+                                    short_value: short_value as f32,
+                                    long_value: long_value as f32,
+                                    ratio: ratio as f32,
+                                    threshold: autotrigger.threshold,
+                                },
+                            );
+                        }
                         data_buffer_on_event_count = 0;
                         data_buffer_off_event_count = 0;
+
                         {
-                            let router_guard = router.read().expect("router mutex is not poisoned");
+                            let router_guard = router.read().expect("router mutex is poisoned");
                             if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
                                 for (_, sender) in clients_ids_and_senders {
                                     let buffer = {
-                                        stack
-                                            .lock()
-                                            .expect("packet stack mutex is not poisoned")
-                                            .pop()
+                                        stack.lock().expect("packet stack mutex is poisoned").pop()
                                     };
                                     if let Some(mut buffer) = buffer {
                                         match data_buffer_start_state {
@@ -468,9 +1318,7 @@ impl Device {
                                                 } else {
                                                     stack
                                                         .lock()
-                                                        .expect(
-                                                            "packet stack mutex is not poisoned",
-                                                        )
+                                                        .expect("packet stack mutex is poisoned")
                                                         .push(buffer);
                                                 }
                                             }
@@ -479,9 +1327,6 @@ impl Device {
                                 }
                             }
                         }
-
-                        // @DEV copy state + data
-
                         data_buffer.clear();
                         data_buffer_start_state = adapter.state();
                         next_packet_index += 1;
@@ -492,32 +1337,138 @@ impl Device {
                         break;
                     }
                 }
+
+                // start a new recording (auto-trigger)
+                if let Some(autotrigger_state) = autotrigger_state.as_ref() {
+                    if autotrigger.enabled && autotrigger_state.ratio >= autotrigger_state.threshold
+                    {
+                        if recording.is_none() {
+                            if let Some(new_recording) = create_new_recording(
+                                &lookback_buffer,
+                                &now,
+                                "",
+                                &adapter,
+                                &self.properties,
+                                &new_configuration,
+                                &self.inner,
+                                &self.event_thread_state,
+                                &context,
+                                &mut autostop_reference_t,
+                                Trigger::Auto(Autotrigger {
+                                    timestamp: crate::utc_string(&now),
+                                    short_sliding_window: autotrigger.short_sliding_window,
+                                    long_sliding_window: autotrigger.long_sliding_window,
+                                    threshold: autotrigger.threshold,
+                                }),
+                            ) {
+                                recording.replace(new_recording);
+                            }
+                        } else {
+                            autostop_reference_t = previous_state.current_t();
+                        }
+                    }
+                }
+
+                // write raw event data to the recording
+                if let Some(recording) = recording.as_mut() {
+                    if let Some(raw_file) = recording.raw_file.as_mut() {
+                        let raw_file_offset = recording.raw_file_offset;
+                        let (count, result) = write_all_count(raw_file, buffer_view.slice);
+                        recording.raw_file_offset += count;
+                        recording.size_bytes += count;
+                        if let Err(error) = result {
+                            if !recording.raw_file_error {
+                                recording.raw_file_error = true;
+                                context
+                                    .blocking_lock()
+                                    .shared_client_state
+                                    .errors
+                                    .push(format!(
+                                        "Writing to \"{}\" failed ({})",
+                                        raw_file_path(&recording.directory, &recording.name, true)
+                                            .to_string_lossy(),
+                                        error
+                                    ));
+                            }
+                        }
+                        // @DEV write the following to the index file:
+                        // - raw_file_offset
+                        // - previous_state
+                        // - usb timings
+                        // - whether this is the first packet after a clutch
+                    }
+                }
+
+                // push data to the lookback buffer
+                if let Some(lookback_buffer) = lookback_buffer.as_mut() {
+                    lookback_buffer.push(
+                        now,
+                        previous_state,
+                        adapter.current_t(),
+                        buffer_view.slice,
+                        new_configuration,
+                    );
+                }
+
+                // stop recording if auto-stop is enabled
+                if autostop.enabled
+                    && adapter.current_t() >= autostop_reference_t + autostop.duration_us
+                {
+                    let _ = recording.take();
+                }
+
+                // send data to the sampler thread
                 {
                     let mut event_thread_state_guard = self
                         .event_thread_state
                         .lock()
-                        .expect("event thread state mutex is not poisoned");
+                        .expect("event thread state mutex is poisoned");
                     event_thread_state_guard.lookback_buffer_state = lookback_buffer
                         .as_ref()
                         .map(|lookback_buffer| lookback_buffer.state());
-                    //event_thread_state_guard.path: Option<std::path::PathBuf>,
                     event_thread_state_guard.on_event_rate = on_event_rate;
                     event_thread_state_guard.off_event_rate = off_event_rate;
                     event_thread_state_guard.rising_trigger_count += rising_trigger_count;
                     event_thread_state_guard.falling_trigger_count += falling_trigger_count;
-                    // @TODO event_thread_state_guard.recording_duration_us;
-                    // @TODO event_thread_state_guard.recording_size_bytes;
+                    if let Some(autotrigger_state) = autotrigger_state {
+                        update_autotrigger_state(
+                            &mut event_thread_state_guard.autotrigger_state,
+                            autotrigger_state,
+                        );
+                    }
+                    match recording.as_ref() {
+                        Some(recording) => {
+                            recording.update_file_state(
+                                adapter.current_t(),
+                                &mut event_thread_state_guard.file_state,
+                            );
+                        }
+                        None => {
+                            let _ = event_thread_state_guard.file_state.take();
+                        }
+                    }
                 }
             }
         }
-
-        println!("main loop done"); // @DEV
-
         let _ = router
             .write()
-            .expect("router mutex is not poisoned")
+            .expect("router mutex is poisoned")
             .remove(&stream_id);
     }
+}
+
+enum SamplerRecordingAction {
+    Continue {
+        duration_us: u64,
+        size_bytes: usize,
+    },
+    Start {
+        directory: std::path::PathBuf,
+        name: String,
+        duration_us: u64,
+        size_bytes: usize,
+    },
+    Stop,
 }
 
 impl DeviceSampler {
@@ -532,7 +1483,13 @@ impl DeviceSampler {
                 context_guard.record_state_stack.clone(),
             )
         };
-        let mut samples_file: Option<std::io::BufWriter<std::fs::File>> = None;
+        let mut sampler_recording: Option<SamplerRecording> = None;
+        let mut previous_autotrigger_state = AutotriggerState {
+            short_value: 0.0,
+            long_value: 0.0,
+            ratio: 1.0,
+            threshold: protocol::Autotrigger::default().threshold,
+        };
         let mut next_sample = std::time::Instant::now();
         while self.running.load(std::sync::atomic::Ordering::Relaxed) {
             let now = std::time::Instant::now();
@@ -551,6 +1508,7 @@ impl DeviceSampler {
                         system_timestamp: 0,
                         on_event_rate: 0.0,
                         off_event_rate: 0.0,
+                        autotrigger_state: previous_autotrigger_state,
                     })
                 }
                 neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
@@ -559,6 +1517,7 @@ impl DeviceSampler {
                         system_timestamp: 0,
                         on_event_rate: 0.0,
                         off_event_rate: 0.0,
+                        autotrigger_state: previous_autotrigger_state,
                     })
                 }
                 neuromorphic_drivers::Device::PropheseeEvk4(device) => {
@@ -577,14 +1536,15 @@ impl DeviceSampler {
                             .powf(EVK4_ILLUMINANCE_BETA)
                             as f32,
                         temperature,
+                        autotrigger_state: previous_autotrigger_state,
                     })
                 }
             };
-            let (lookback_buffer_state, file_state) = {
+            let (sampler_recording_action, lookback_buffer_state) = {
                 let mut event_thread_state_guard = self
                     .event_thread_state
                     .lock()
-                    .expect("event thread state mutex is not poisoned");
+                    .expect("event thread state mutex is poisoned");
                 let system_time = std::time::SystemTime::now()
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .unwrap_or(std::time::Duration::default())
@@ -598,12 +1558,24 @@ impl DeviceSampler {
                         davis346_sample.system_timestamp = system_timestamp;
                         davis346_sample.on_event_rate = event_thread_state_guard.on_event_rate;
                         davis346_sample.off_event_rate = event_thread_state_guard.off_event_rate;
+                        if let Some(autotrigger_state) =
+                            event_thread_state_guard.autotrigger_state.take()
+                        {
+                            davis346_sample.autotrigger_state = autotrigger_state;
+                            previous_autotrigger_state = autotrigger_state;
+                        }
                     }
                     Sample::Evk3HdSample(evk3_hd_sample) => {
                         evk3_hd_sample.system_time = system_time;
                         evk3_hd_sample.system_timestamp = system_timestamp;
                         evk3_hd_sample.on_event_rate = event_thread_state_guard.on_event_rate;
                         evk3_hd_sample.off_event_rate = event_thread_state_guard.off_event_rate;
+                        if let Some(autotrigger_state) =
+                            event_thread_state_guard.autotrigger_state.take()
+                        {
+                            evk3_hd_sample.autotrigger_state = autotrigger_state;
+                            previous_autotrigger_state = autotrigger_state;
+                        }
                     }
                     Sample::Evk4Sample(evk4_sample) => {
                         evk4_sample.system_time = system_time;
@@ -614,23 +1586,109 @@ impl DeviceSampler {
                             event_thread_state_guard.rising_trigger_count;
                         evk4_sample.falling_trigger_count =
                             event_thread_state_guard.falling_trigger_count;
+                        if let Some(autotrigger_state) =
+                            event_thread_state_guard.autotrigger_state.take()
+                        {
+                            evk4_sample.autotrigger_state = autotrigger_state;
+                            previous_autotrigger_state = autotrigger_state;
+                        }
                     }
                 }
                 event_thread_state_guard.rising_trigger_count = 0;
                 event_thread_state_guard.falling_trigger_count = 0;
+                let sampler_recording_action = match event_thread_state_guard.file_state.as_ref() {
+                    Some(file_state) => match sampler_recording.as_ref() {
+                        Some(sampler_recording) => {
+                            if sampler_recording.directory == file_state.directory
+                                && sampler_recording.name == file_state.name
+                            {
+                                SamplerRecordingAction::Continue {
+                                    duration_us: file_state.duration_us,
+                                    size_bytes: file_state.size_bytes,
+                                }
+                            } else {
+                                SamplerRecordingAction::Start {
+                                    directory: file_state.directory.clone(),
+                                    name: file_state.name.clone(),
+                                    duration_us: file_state.duration_us,
+                                    size_bytes: file_state.size_bytes,
+                                }
+                            }
+                        }
+                        None => SamplerRecordingAction::Start {
+                            directory: file_state.directory.clone(),
+                            name: file_state.name.clone(),
+                            duration_us: file_state.duration_us,
+                            size_bytes: file_state.size_bytes,
+                        },
+                    },
+                    None => SamplerRecordingAction::Stop,
+                };
                 (
+                    sampler_recording_action,
                     event_thread_state_guard.lookback_buffer_state.clone(),
-                    event_thread_state_guard.file_state.clone(),
                 )
             };
+            let name_and_duration_us_and_size_bytes: Option<(String, u64, usize)> =
+                match sampler_recording_action {
+                    SamplerRecordingAction::Continue {
+                        duration_us,
+                        size_bytes,
+                    } => {
+                        match sampler_recording.as_mut() {
+                            Some(sampler_recording) => {
+                                // @DEV write sample to file
+                                Some((
+                                    sampler_recording.name.clone(),
+                                    duration_us,
+                                    size_bytes + sampler_recording.size_bytes,
+                                ))
+                            }
+                            None => unreachable!(),
+                        }
+                    }
+                    SamplerRecordingAction::Start {
+                        directory,
+                        name,
+                        duration_us,
+                        size_bytes,
+                    } => {
+                        let _ = sampler_recording.take();
+                        match SamplerRecording::new(directory.clone(), name.clone(), 0) {
+                            Ok(new_sampler_recording) => {
+                                let size_bytes = size_bytes + new_sampler_recording.size_bytes;
+                                sampler_recording.replace(new_sampler_recording);
+                                // @DEV if we have a lookback, write it here
+                                Some((name, duration_us, size_bytes))
+                            }
+                            Err(error) => {
+                                context
+                                    .blocking_lock()
+                                    .shared_client_state
+                                    .errors
+                                    .push(format!(
+                                        "Creating \"{}\" failed ({})",
+                                        samples_file_path(&directory, &name, true)
+                                            .to_string_lossy(),
+                                        error
+                                    ));
+                                Some((name, duration_us, size_bytes))
+                            }
+                        }
+                    }
+                    SamplerRecordingAction::Stop => {
+                        let _ = sampler_recording.take();
+                        None
+                    }
+                };
             {
-                let router_guard = router.read().expect("router mutex is not poisoned");
+                let router_guard = router.read().expect("router mutex is poisoned");
                 if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
                     for (_, sender) in clients_ids_and_senders {
                         let buffer = {
                             sample_stack
                                 .lock()
-                                .expect("packet stack mutex is not poisoned")
+                                .expect("packet stack mutex is poisoned")
                                 .pop()
                         };
                         if let Some(mut buffer) = buffer {
@@ -644,7 +1702,7 @@ impl DeviceSampler {
                             } else {
                                 sample_stack
                                     .lock()
-                                    .expect("sample stack mutex is not poisoned")
+                                    .expect("sample stack mutex is poisoned")
                                     .push(buffer);
                             }
                         }
@@ -657,20 +1715,21 @@ impl DeviceSampler {
                         let buffer = {
                             record_state_stack
                                 .lock()
-                                .expect("packet stack mutex is not poisoned")
+                                .expect("packet stack mutex is poisoned")
                                 .pop()
                         };
                         if let Some(mut buffer) = buffer {
                             buffer.clear();
-                            let total_length = 38
-                                + file_state
+                            let total_length = 42
+                                + name_and_duration_us_and_size_bytes
                                     .as_ref()
-                                    .map_or(0, |file_state| file_state.name.len());
+                                    .map_or(0, |(name, _, _)| name.len());
                             buffer.reserve_exact(total_length);
                             buffer.extend(&(total_length as u32).to_le_bytes()); // 4
                             serialize_record_state_to(
+                                self.id,
                                 &lookback_buffer_state,
-                                &file_state,
+                                &name_and_duration_us_and_size_bytes,
                                 &mut buffer,
                             );
                             if let Ok(permit) = sender.try_reserve() {
@@ -678,7 +1737,7 @@ impl DeviceSampler {
                             } else {
                                 sample_stack
                                     .lock()
-                                    .expect("sample stack mutex is not poisoned")
+                                    .expect("sample stack mutex is poisoned")
                                     .push(buffer);
                             }
                         }
@@ -686,11 +1745,9 @@ impl DeviceSampler {
                 }
             }
         }
-        println!("sampler loop done"); // @DEV
-
         let _ = router
             .write()
-            .expect("router mutex is not poisoned")
+            .expect("router mutex is poisoned")
             .remove(&stream_id);
     }
 }

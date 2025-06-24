@@ -193,7 +193,7 @@
                         colormap.name,
                         colormapIcon,
                     ])}
-                    iconStyle="width: 100px; margin-right: 10px; flex-grow: 0; flex-shrink: 0; display: flex; flex-direction: column;"
+                    iconStyle="width: 80px; margin-right: 10px; flex-grow: 0; flex-shrink: 0; display: flex; flex-direction: column;"
                     bind:selectedIndex={display.properties.colormapIndex}
                 ></Dropdown>
                 <Switch

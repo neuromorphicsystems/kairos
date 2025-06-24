@@ -17,6 +17,9 @@
     <div
         class="switch-container {checked ? 'active' : ''}"
         onclick={() => {
+            if (onChange) {
+                onChange(!checked);
+            }
             checked = !checked;
         }}
         role="none"
@@ -90,7 +93,9 @@
         align-items: center;
         overflow: hidden;
         opacity: 0;
-        transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s;
+        transition:
+            transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+            opacity 0.2s;
     }
 
     .switch-container.active .switch-track {

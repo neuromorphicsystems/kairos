@@ -5,11 +5,15 @@
     import PopoverMask from "./popoverMask.svelte";
 
     let {
-        open = $bindable(),
+        open,
         activeDisplayId = $bindable(),
+        left,
+        onClose,
     }: {
         open: boolean;
         activeDisplayId: ContainerId;
+        left: number;
+        onClose: () => void;
     } = $props();
 
     function updateLayout(layout: Layout) {
@@ -120,13 +124,13 @@
                 throw new Error(`unsupported layout ${layout}`);
             }
         }
-        open = false;
+        onClose();
     }
 </script>
 
-<PopoverMask bind:open></PopoverMask>
+<PopoverMask bind:open {onClose}></PopoverMask>
 
-<div class="content {open ? '' : 'hidden'}">
+<div class="content {open ? '' : 'hidden'}" style="left: {left}px">
     <button
         aria-label="Layout h"
         class={appState.local.layout === "h" ? "active" : ""}
@@ -327,21 +331,6 @@
             >
         </div>
     </button>
-
-    <div class="arrow">
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="50"
-            height="17"
-            viewBox="0 0 50 17"
-            ><path
-                fill="#333333"
-                fill-rule="evenodd"
-                stroke="#555555"
-                d="M-35,17 L-35,14.5 L9.58334938,14.5 C11.1339256,14.5 12.6242951,13.8997163 13.7420017,12.8249984 L23.6137826,3.33290138 C24.3880055,2.58845622 25.6119945,2.58845622 26.3862174,3.33290138 L36.2579983,12.8249984 C37.3757049,13.8997163 38.8660744,14.5 40.4166506,14.5 L80,14.5 L80,14.5 L80,17"
-            /></svg
-        >
-    </div>
 </div>
 
 <style>
@@ -350,9 +339,8 @@
     }
 
     .content {
-        position: absolute;
-        top: calc(6px + var(--status-bar-height));
-        left: calc(var(--device-pane-width) + 29px - 100px);
+        position: fixed;
+        top: calc(var(--status-bar-height) - 4px);
         width: 222px;
         height: 186px;
         background-color: var(--background-3);
@@ -404,11 +392,5 @@
 
     button:hover .icon svg rect {
         fill: var(--content-3);
-    }
-
-    .arrow {
-        position: absolute;
-        top: -15px;
-        left: 74px;
     }
 </style>

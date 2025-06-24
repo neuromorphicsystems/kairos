@@ -16,6 +16,24 @@ interface Evk4SamplesStream {
 
 export type Stream = Evt3Stream | Evk4SamplesStream;
 
+export interface Lookback {
+    enabled: boolean;
+    maximum_duration_us: number;
+    maximum_size_bytes: number;
+}
+
+export interface Autostop {
+    enabled: boolean;
+    duration_us: number;
+}
+
+export interface Autotrigger {
+    enabled: boolean;
+    short_sliding_window: number;
+    long_sliding_window: number;
+    threshold: number;
+}
+
 interface Device {
     id: number;
     name: string;
@@ -25,6 +43,9 @@ interface Device {
     address: number;
     streams: Stream[];
     configuration: Configuration;
+    lookback: Lookback;
+    autostop: Autostop;
+    autotrigger: Autotrigger;
 }
 
 interface SharedState {
@@ -82,6 +103,7 @@ export function defaultNamesAndRanges(stream: Stream): [string, number][] {
                 ["Illuminance", 3],
                 ["Temperature", 0],
                 ["External events", 0],
+                ["Autotrigger", 0],
             ];
         }
         default:
@@ -113,15 +135,56 @@ interface Display {
 interface LocalState {
     connectionStatus: constants.ConnectionStatus;
     layout: Layout;
+    layoutToPosition: { [key in Layout]: number[] };
     deviceIndex: number | null;
     displays: [Display, Display, Display, Display];
     nextErrorIndex: number;
 }
 
-interface RecordState {}
+export interface RecordState {
+    lookback: {
+        duration_us: bigint;
+        size_bytes: bigint;
+    } | null;
+    recording: {
+        name: string;
+        duration_us: bigint;
+        size_bytes: bigint;
+    } | null;
+}
+
+type RecordingState =
+    | {
+          type: "Ongoing";
+      }
+    | {
+          type: "Incomplete";
+          size_bytes: number;
+      }
+    | {
+          type: "Complete";
+          size_bytes: number;
+          zip: boolean;
+      }
+    | {
+          type: "Queued";
+          size_bytes: number;
+          zip: boolean;
+      }
+    | {
+          type: "Converting";
+          size_bytes: number;
+          zip: boolean;
+      };
+
+export interface Recording {
+    name: string;
+    state: RecordingState;
+}
 
 interface AppState {
     shared: SharedState;
+    recordings: Recording[];
     local: LocalState;
     deviceIdToRecordState: { [key: number]: RecordState };
 }
@@ -133,9 +196,21 @@ const appState: AppState = $state({
         devices: [],
         errors: [],
     },
+    recordings: [],
     local: {
         connectionStatus: "connecting",
         layout: "h",
+        layoutToPosition: {
+            full: [],
+            h: [0.75],
+            hv1: [0.5, 0.5],
+            hv2: [0.5, 0.5],
+            v: [0.5],
+            vh1: [0.5, 0.5],
+            vh2: [0.5, 0.5],
+            hv1v2: [0.5, 0.5, 0.5],
+            vh1h2: [0.5, 0.5, 0.5],
+        },
         deviceIndex: null,
         displays: [
             {

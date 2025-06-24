@@ -1840,32 +1840,32 @@ export const namedColormaps: {
     off: [number, number, number, number][];
 }[] = [
     {
-        name: "Starry Night",
+        name: "De sterrennacht",
         on: STARRY_NIGHT.slice(STARRY_NIGHT.length / 2),
         off: STARRY_NIGHT.slice(0, STARRY_NIGHT.length / 2).toReversed(),
     },
     {
-        name: "Lipari",
+        name: "The Fighting Temeraire",
         on: LIPARI,
         off: LIPARI,
     },
     {
-        name: "Batlow",
+        name: "Dyevyatiy val",
         on: BATLOW,
         off: BATLOW,
     },
     {
-        name: "Berlin",
+        name: "Blau II",
         on: BERLIN.slice(BERLIN.length / 2),
         off: BERLIN.slice(0, BERLIN.length / 2).toReversed(),
     },
     {
-        name: "Managua",
+        name: "Skrik",
         on: MANAGUA.slice(0, MANAGUA.length / 2).toReversed(),
         off: MANAGUA.slice(MANAGUA.length / 2),
     },
     {
-        name: "Roma",
+        name: "Impression, Soleil levant",
         on: ROMA.slice(0, ROMA.length / 2).toReversed(),
         off: ROMA.slice(ROMA.length / 2),
     },

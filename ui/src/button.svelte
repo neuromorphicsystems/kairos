@@ -5,17 +5,27 @@
         label,
         icon,
         iconStyle,
+        disabled,
         onClick = $bindable(),
     }: {
         label: string;
         icon?: Snippet<[]>;
         iconStyle?: string;
+        disabled?: boolean;
         onClick: () => void;
     } = $props();
 </script>
 
 <div class="button-wrapper">
-    <div class="button" onclick={() => onClick()} role="none">
+    <div
+        class="button {disabled ? 'disabled' : ''}"
+        onclick={() => {
+            if (disabled == null || !disabled) {
+                onClick();
+            }
+        }}
+        role="none"
+    >
         {#if icon != null}
             <div class="icon" style={iconStyle ?? ""}>
                 {@render icon()}
@@ -46,6 +56,11 @@
         gap: 5px;
     }
 
+    .button.disabled {
+        background-color: var(--button-background-disabled);
+        cursor: default;
+    }
+
     .icon {
         flex-grow: 0;
         flex-shrink: 0;
@@ -70,5 +85,13 @@
 
     .button:active {
         background-color: var(--button-background-active);
+    }
+
+    .button.disabled:hover {
+        background-color: var(--button-background-disabled);
+    }
+
+    .button.disabled:active {
+        background-color: var(--button-background-disabled);
     }
 </style>

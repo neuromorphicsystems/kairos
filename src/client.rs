@@ -1,8 +1,8 @@
 use crate::constants;
 use crate::device;
+use crate::now_utc_string;
 use crate::protocol;
 use crate::stack;
-use crate::utc_string;
 use anyhow::anyhow;
 
 use neuromorphic_drivers::UsbDevice;
@@ -46,7 +46,7 @@ fn spawn_stream(
     tokio::spawn(async move {
         println!(
             "{} | started stream {} task (session id {})",
-            utc_string(),
+            now_utc_string(),
             stream_id.0,
             incoming_session_id,
         ); // @DEV
@@ -75,14 +75,11 @@ fn spawn_stream(
                     } else {
                         unidirectional_stream.write_all(&packet).await
                     };
-                    stack
-                        .lock()
-                        .expect("stack mutex is not poisoned")
-                        .push(packet);
+                    stack.lock().expect("stack mutex is poisoned").push(packet);
                     if result.is_err() {
                         println!(
                             "{} | unidirectional_stream write error: {:?} (session id {})",
-                            utc_string(),
+                            now_utc_string(),
                             result,
                             incoming_session_id,
                         ); // @DEV
@@ -92,7 +89,7 @@ fn spawn_stream(
                 None => {
                     println!(
                         "{} | packet_receiver.recv() returned None (session id {})",
-                        utc_string(),
+                        now_utc_string(),
                         incoming_session_id,
                     ); // @DEV
                     break;
@@ -101,15 +98,15 @@ fn spawn_stream(
         }
         println!(
             "{} | camera task will exit (session id {})",
-            utc_string(),
+            now_utc_string(),
             incoming_session_id
         ); // @DEV
         {
-            let mut router_guard = router.write().expect("router mutex is not poisoned");
+            let mut router_guard = router.write().expect("router mutex is poisoned");
 
             println!(
                 "{} | [in stream handler] remove client_id = {} from router {:?} (session id {})",
-                utc_string(),
+                now_utc_string(),
                 client_id.0,
                 router_guard,
                 incoming_session_id,
@@ -130,7 +127,7 @@ fn spawn_stream(
                 if removed != 1 {
                     println!(
                         "{} | removed {} entries for client {} and stream {} in router during cleanup (session id {})",
-                        utc_string(),
+                        now_utc_string(),
                         removed,
                         client_id.0,
                         stream_id.0,
@@ -143,7 +140,7 @@ fn spawn_stream(
 
             println!(
                 "{} | removed client_id = {} from router {:?} (session id {})",
-                utc_string(),
+                now_utc_string(),
                 client_id.0,
                 router_guard,
                 incoming_session_id,
@@ -152,10 +149,7 @@ fn spawn_stream(
         loop {
             match packet_receiver.recv().await {
                 Some(packet) => {
-                    stack
-                        .lock()
-                        .expect("stack mutex is not poisoned")
-                        .push(packet);
+                    stack.lock().expect("stack mutex is poisoned").push(packet);
                 }
                 None => break,
             }
@@ -179,18 +173,7 @@ async fn handle_client_message(
 ) -> Result<(), anyhow::Error> {
     match message {
         protocol::ClientMessage::Ping => {
-            println!(
-                "{} | pong (session id {})",
-                utc_string(),
-                incoming_session_id
-            ); // @DEV
             if let Err(error) = message_bidirectional_stream.0.write_all(pong_bytes).await {
-                println!(
-                    "{} | pong error (session id {}): {:?}",
-                    utc_string(),
-                    incoming_session_id,
-                    error
-                ); // @DEV
                 Err(error.into())
             } else {
                 Ok(())
@@ -200,7 +183,7 @@ async fn handle_client_message(
             let stream_id = device::StreamId(stream_id);
             println!(
                 "{} | start stream {} (session id {})",
-                utc_string(),
+                now_utc_string(),
                 stream_id.0,
                 incoming_session_id
             ); // @DEV
@@ -223,7 +206,7 @@ async fn handle_client_message(
             let (packet_sender, packet_receiver) =
                 tokio::sync::mpsc::channel(maximum_client_buffer_count);
             let spawn = {
-                let mut router_guard = router.write().expect("router mutex is not poisoned");
+                let mut router_guard = router.write().expect("router mutex is poisoned");
                 if let Some(clients_ids_and_senders) = router_guard.get_mut(&stream_id) {
                     if clients_ids_and_senders
                         .iter()
@@ -233,7 +216,7 @@ async fn handle_client_message(
                     } else {
                         println!(
                             "{} | add sender for client_id = {} (session id {})",
-                            utc_string(),
+                            now_utc_string(),
                             client_id.0,
                             incoming_session_id,
                         ); // @DEV
@@ -241,7 +224,7 @@ async fn handle_client_message(
 
                         println!(
                             "{} | added sender for client_id = {} to router {:?} (session id {})",
-                            utc_string(),
+                            now_utc_string(),
                             client_id.0,
                             router_guard,
                             incoming_session_id,
@@ -276,20 +259,36 @@ async fn handle_client_message(
         } => {
             let device_id = device::DeviceId(device_id);
             let mut context_guard = context.lock().await;
-            if let Some(device) = context_guard.id_to_device.get_mut(&device_id) {
-                match device.inner.as_ref() {
+            for device in context_guard.shared_client_state.devices.iter_mut() {
+                if device.id == device_id.0 {
+                    device.configuration = configuration.clone();
+                    break;
+                }
+            }
+            if let Some(device_proxy) = context_guard.id_to_device.get_mut(&device_id) {
+                match device_proxy.inner.as_ref() {
                     neuromorphic_drivers::Device::InivationDavis346(device) => {
                         match configuration {
                             neuromorphic_drivers::Configuration::InivationDavis346(
                                 configuration,
-                            ) => {}
+                            ) => {
+                                device.update_configuration(configuration);
+                                device_proxy
+                                    .configuration_changed
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
                             _ => println!(
                                 "mismatch between the configuration type and the device type"
                             ),
                         }
                     }
                     neuromorphic_drivers::Device::PropheseeEvk3Hd(device) => match configuration {
-                        neuromorphic_drivers::Configuration::PropheseeEvk3Hd(configuration) => {}
+                        neuromorphic_drivers::Configuration::PropheseeEvk3Hd(configuration) => {
+                            device.update_configuration(configuration);
+                            device_proxy
+                                .configuration_changed
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
                         _ => {
                             println!("mismatch between the configuration type and the device type")
                         }
@@ -297,6 +296,9 @@ async fn handle_client_message(
                     neuromorphic_drivers::Device::PropheseeEvk4(device) => match configuration {
                         neuromorphic_drivers::Configuration::PropheseeEvk4(configuration) => {
                             device.update_configuration(configuration);
+                            device_proxy
+                                .configuration_changed
+                                .store(true, std::sync::atomic::Ordering::Release);
                         }
                         _ => {
                             println!("mismatch between the configuration type and the device type")
@@ -311,40 +313,102 @@ async fn handle_client_message(
             }
             Ok(())
         }
-        protocol::ClientMessage::UpdateAutotrigger { enabled } => Ok(()),
-        protocol::ClientMessage::UpdateAutostop {
-            enabled,
-            duration_us,
-        } => Ok(()),
         protocol::ClientMessage::UpdateLookback {
-            enabled,
-            maximum_duration_us,
-            maximum_size_bytes,
-        } => Ok(()),
+            device_id,
+            lookback,
+        } => {
+            let device_id = device::DeviceId(device_id);
+            let mut context_guard = context.lock().await;
+            if let Some(device) = context_guard.id_to_device.get_mut(&device_id) {
+                let mut record_configuration_guard = device
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                record_configuration_guard.lookback = lookback;
+            } else {
+                println!(
+                    "unknown device id {} in UpdateLookback message",
+                    device_id.0
+                );
+            }
+            for context_device in context_guard.shared_client_state.devices.iter_mut() {
+                if context_device.id == device_id.0 {
+                    context_device.lookback = lookback;
+                    if let Err(error) = context_guard.broadcast_shared_client_state() {
+                        println!("broadcast_shared_client_state error: {error:?}");
+                    }
+                    break;
+                }
+            }
+            Ok(())
+        }
+        protocol::ClientMessage::UpdateAutostop {
+            device_id,
+            autostop,
+        } => {
+            let device_id = device::DeviceId(device_id);
+            let mut context_guard = context.lock().await;
+            if let Some(device) = context_guard.id_to_device.get_mut(&device_id) {
+                let mut record_configuration_guard = device
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                record_configuration_guard.autostop = autostop;
+            } else {
+                println!(
+                    "unknown device id {} in UpdateAutostop message",
+                    device_id.0
+                );
+            }
+            for context_device in context_guard.shared_client_state.devices.iter_mut() {
+                if context_device.id == device_id.0 {
+                    context_device.autostop = autostop;
+                    if let Err(error) = context_guard.broadcast_shared_client_state() {
+                        println!("broadcast_shared_client_state error: {error:?}");
+                    }
+                    break;
+                }
+            }
+            Ok(())
+        }
+        protocol::ClientMessage::UpdateAutotrigger {
+            device_id,
+            autotrigger,
+        } => {
+            let device_id = device::DeviceId(device_id);
+            let mut context_guard = context.lock().await;
+            if let Some(device) = context_guard.id_to_device.get_mut(&device_id) {
+                let mut record_configuration_guard = device
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                record_configuration_guard.autotrigger = autotrigger.clone();
+            } else {
+                println!(
+                    "unknown device id {} in UpdateAutotrigger message",
+                    device_id.0
+                );
+            }
+            for context_device in context_guard.shared_client_state.devices.iter_mut() {
+                if context_device.id == device_id.0 {
+                    context_device.autotrigger = autotrigger.clone();
+                    if let Err(error) = context_guard.broadcast_shared_client_state() {
+                        println!("broadcast_shared_client_state error: {error:?}");
+                    }
+                    break;
+                }
+            }
+            Ok(())
+        }
         protocol::ClientMessage::StartRecording { device_id, name } => {
             let device_id = device::DeviceId(device_id);
             let mut context_guard = context.lock().await;
-            let recordings_directory =
-                std::path::PathBuf::from(&context_guard.shared_client_state.data_directory)
-                    .join("recordings");
             if let Some(device) = context_guard.id_to_device.get_mut(&device_id) {
-                if let Err(error) = std::fs::create_dir_all(&recordings_directory) {
-                    let data_directory = context_guard.shared_client_state.data_directory.clone();
-                    context_guard.shared_client_state.errors.push(format!(
-                        "creating \"{}\" failed ({})",
-                        recordings_directory.to_string_lossy(),
-                        error
-                    ));
-                } else {
-                    let mut record_configuration = device
-                        .record_configuration
-                        .lock()
-                        .expect("record configuration mutex is not poisoned");
-                    record_configuration.action = device::RecordAction::Start {
-                        directory: recordings_directory,
-                        name,
-                    };
-                }
+                let mut record_configuration = device
+                    .record_configuration
+                    .lock()
+                    .expect("record configuration mutex is poisoned");
+                record_configuration.action = device::RecordAction::Start(name);
             } else {
                 println!(
                     "unknown device id {} in StartRecording message",
@@ -360,7 +424,7 @@ async fn handle_client_message(
                 let mut record_configuration = device
                     .record_configuration
                     .lock()
-                    .expect("record configuration mutex is not poisoned");
+                    .expect("record configuration mutex is poisoned");
                 record_configuration.action = device::RecordAction::Stop;
             } else {
                 println!(
@@ -370,11 +434,6 @@ async fn handle_client_message(
             }
             Ok(())
         }
-        protocol::ClientMessage::UpdateLookback {
-            enabled,
-            maximum_duration_us,
-            maximum_size_bytes,
-        } => Ok(()),
     }
 }
 
@@ -406,6 +465,7 @@ pub async fn manage_connection(
     let (router, packet_stack, sample_stack, record_state_stack, maximum_client_buffer_count) = {
         let (
             shared_client_state_bytes,
+            recordings_bytes,
             router,
             packet_stack,
             sample_stack,
@@ -414,7 +474,9 @@ pub async fn manage_connection(
         ) = {
             let context_guard = context.lock().await;
             (
-                context_guard.shared_client_state.to_bytes()?,
+                protocol::ServerMessage::SharedClientState(&context_guard.shared_client_state)
+                    .to_bytes()?,
+                protocol::ServerMessage::Recordings(&context_guard.recordings).to_bytes()?,
                 context_guard.router.clone(),
                 context_guard.packet_stack.clone(),
                 context_guard.sample_stack.clone(),
@@ -425,6 +487,10 @@ pub async fn manage_connection(
         message_bidirectional_stream
             .0
             .write_all(&shared_client_state_bytes)
+            .await?;
+        message_bidirectional_stream
+            .0
+            .write_all(&recordings_bytes)
             .await?;
         (
             router,
@@ -437,7 +503,7 @@ pub async fn manage_connection(
     let (record_state_sender, record_state_receiver) =
         tokio::sync::mpsc::channel(maximum_client_buffer_count);
     {
-        let mut router_guard = router.write().expect("router mutex is not poisoned");
+        let mut router_guard = router.write().expect("router mutex is poisoned");
         if let Some(clients_ids_and_senders) =
             router_guard.get_mut(&device::StreamId(constants::RECORD_STATE_STREAM_ID))
         {
@@ -462,7 +528,7 @@ pub async fn manage_connection(
     'client: loop {
         println!(
             "{} | client loop (client id {}, session id {})",
-            utc_string(),
+            now_utc_string(),
             client_id.0,
             incoming_session_id,
         ); // @DEV
@@ -518,7 +584,7 @@ pub async fn manage_connection(
                         }
                     }
                     Err(error) => {
-                        println!("{} | error from message reader {:?} (session id {})", utc_string(), error, incoming_session_id); // @DEV
+                        println!("{} | error from message reader {:?} (session id {})", now_utc_string(), error, incoming_session_id); // @DEV
                         result = Err(error.into());
                         break 'client;
                     }
@@ -532,7 +598,7 @@ pub async fn manage_connection(
                         .await {
                             println!(
                                 "{} | message_bidirectional_stream write_all error (client id {}, session id {})",
-                                utc_string(),
+                                now_utc_string(),
                                 client_id.0,
                                 incoming_session_id,
                             ); // @DEV
@@ -543,7 +609,7 @@ pub async fn manage_connection(
                 } else {
                     println!(
                         "{} | shared_client_state_receiver closed (client id {}, session id {})",
-                        utc_string(),
+                        now_utc_string(),
                         client_id.0,
                         incoming_session_id,
                     ); // @DEV
@@ -555,11 +621,11 @@ pub async fn manage_connection(
         }
     }
     {
-        let mut router_guard = router.write().expect("router mutex is not poisoned");
+        let mut router_guard = router.write().expect("router mutex is poisoned");
 
         println!(
             "{} | [in client handler] remove client_id = {} from router {:?} (session id {})",
-            utc_string(),
+            now_utc_string(),
             client_id.0,
             router_guard,
             incoming_session_id,
@@ -581,7 +647,7 @@ pub async fn manage_connection(
 
         println!(
             "{} | removed client_id = {} from router {:?} (session id {})",
-            utc_string(),
+            now_utc_string(),
             client_id.0,
             router_guard,
             incoming_session_id,
@@ -591,7 +657,7 @@ pub async fn manage_connection(
         if let Err(error) = stream_handle.await {
             println!(
                 "{} | stream_handle error (session id {}): {:?}",
-                utc_string(),
+                now_utc_string(),
                 incoming_session_id,
                 error
             );

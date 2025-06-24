@@ -5,12 +5,24 @@ import * as chartjs from "chart.js/auto";
 
 chartjs.Chart.defaults.font.family = '"Roboto", sans-serif';
 
-interface ChartProperties {
+interface Curve {
     name: string;
-    yLabel: string;
+    color: string;
+    dash: [number, number] | null;
+    axis: 0 | 1;
+    order: number;
+}
+
+interface YAxis {
+    label: string;
     units: string | null;
     logarithmic: boolean;
-    curvesNamesAndColors: [string, string][];
+}
+
+interface ChartProperties {
+    name: string;
+    yAxes: [YAxis, YAxis | null];
+    curves: Curve[];
 }
 
 class Collection {
@@ -26,7 +38,7 @@ class Collection {
         this.labels = [];
         this.extendedLabels = [];
         this.chartToCurvesToData = chartsProperties.map(properties =>
-            properties.curvesNamesAndColors.map(_ => []),
+            properties.curves.map(_ => []),
         );
     }
 
@@ -87,18 +99,19 @@ class Chart {
         this.inner = new chartjs.Chart(canvas.getContext("2d"), {
             type: "scatter",
             data: {
-                datasets: properties.curvesNamesAndColors.map(
-                    (nameAndColor, index) => ({
-                        spanGaps: false,
-                        label: nameAndColor[0],
-                        backgroundColor: nameAndColor[1],
-                        borderColor: nameAndColor[1],
-                        pointHoverRadius: 0,
-                        borderJoinStyle: "round",
-                        data: collection.chartToCurvesToData[chartIndex][index],
-                        showLine: true,
-                    }),
-                ),
+                datasets: properties.curves.map((curve, index) => ({
+                    spanGaps: false,
+                    label: curve.name,
+                    backgroundColor: curve.color,
+                    borderColor: curve.color,
+                    borderDash: curve.dash == null ? [] : [5, 5],
+                    pointHoverRadius: 0,
+                    borderJoinStyle: "round",
+                    data: collection.chartToCurvesToData[chartIndex][index],
+                    showLine: true,
+                    yAxisID: curve.axis === 1 ? "y1" : "y",
+                    order: curve.order,
+                })),
             },
             options: {
                 normalized: true,
@@ -134,7 +147,10 @@ class Chart {
                     },
                     y: {
                         display: true,
-                        type: properties.logarithmic ? "logarithmic" : "linear",
+                        position: "left",
+                        type: properties.yAxes[0].logarithmic
+                            ? "logarithmic"
+                            : "linear",
                         ticks: {
                             maxRotation: 0,
                             autoSkipPadding: 20,
@@ -151,7 +167,7 @@ class Chart {
                         },
                         title: {
                             display: true,
-                            text: properties.yLabel,
+                            text: properties.yAxes[0].label,
                             color: "#aaaaaa",
                             padding: 10,
                             font: {
@@ -159,6 +175,40 @@ class Chart {
                             },
                         },
                     },
+                    ...(properties.yAxes[1] == null
+                        ? {}
+                        : {
+                              y1: {
+                                  display: true,
+                                  position: "right",
+                                  type: properties.yAxes[1].logarithmic
+                                      ? "logarithmic"
+                                      : "linear",
+                                  ticks: {
+                                      maxRotation: 0,
+                                      autoSkipPadding: 20,
+                                      font: {
+                                          family: '"Roboto Mono", monospace',
+                                      },
+                                      color: "#aaaaaa",
+                                  },
+                                  grid: {
+                                      drawOnChartArea: false,
+                                  },
+                                  border: {
+                                      color: "#aaaaaa",
+                                  },
+                                  title: {
+                                      display: true,
+                                      text: properties.yAxes[1].label,
+                                      color: "#aaaaaa",
+                                      padding: 10,
+                                      font: {
+                                          size: 14,
+                                      },
+                                  },
+                              },
+                          }),
                 },
                 interaction: {
                     mode: "nearest",
@@ -180,6 +230,19 @@ class Chart {
                             const parent = context.chart.canvas.parentNode;
                             let container: HTMLDivElement =
                                 parent.querySelector(".container");
+                            if (
+                                context.tooltip.opacity === 0 ||
+                                context.tooltip.dataPoints == null ||
+                                context.tooltip.dataPoints.length === 0
+                            ) {
+                                container.style.opacity = "0";
+                                return;
+                            }
+                            const dataPoints = context.tooltip.dataPoints
+                                .slice()
+                                .sort(
+                                    (a, b) => a.datasetIndex - b.datasetIndex,
+                                );
                             if (container == null) {
                                 container = document.createElement("div");
                                 container.classList.add("container");
@@ -202,8 +265,7 @@ class Chart {
                                 points.style.right = "0";
                                 points.style.bottom = "0";
                                 points.classList.add("points");
-                                for (const dataPoint of context.tooltip
-                                    .dataPoints) {
+                                for (const dataPoint of dataPoints) {
                                     const point = document.createElement("div");
                                     point.style.position = "absolute";
                                     point.style.width = "8px";
@@ -232,8 +294,7 @@ class Chart {
                                 tooltipTitle.classList.add("title");
                                 tooltipTitle.style.paddingBottom = "6px";
                                 tooltip.appendChild(tooltipTitle);
-                                for (const dataPoint of context.tooltip
-                                    .dataPoints) {
+                                for (const dataPoint of dataPoints) {
                                     const row = document.createElement("div");
                                     row.classList.add("row");
                                     row.style.display = "flex";
@@ -260,10 +321,14 @@ class Chart {
                                     value.classList.add("value");
                                     value.style.paddingLeft = "12px";
                                     label.appendChild(value);
-                                    if (properties.units != null) {
+                                    const yAxis =
+                                        dataPoint.dataset.yAxisID === "y1"
+                                            ? properties.yAxes[1]
+                                            : properties.yAxes[0];
+                                    if (yAxis.units != null) {
                                         const units =
                                             document.createElement("span");
-                                        units.innerText = properties.units;
+                                        units.innerText = yAxis.units;
                                         units.style.paddingLeft = "6px";
                                         label.appendChild(units);
                                     }
@@ -273,111 +338,102 @@ class Chart {
                                 container.appendChild(tooltip);
                                 parent.appendChild(container);
                             }
-                            if (context.tooltip.opacity === 0) {
-                                container.style.opacity = "0";
-                            } else {
-                                const x =
-                                    context.tooltip.dataPoints[0].element.x;
-                                const line: HTMLDivElement =
-                                    container.querySelector(".line");
-                                line.style.top = `${context.chart.chartArea.top}px`;
-                                line.style.height = `${context.chart.chartArea.bottom - context.chart.chartArea.top}px`;
-                                line.style.left = `${x - 0.5}px`;
-                                const points: HTMLDivElement =
-                                    container.querySelector(".points");
-                                let pointIndex = 0;
-                                for (const point of points.children) {
-                                    const dataPoint =
-                                        context.tooltip.dataPoints[pointIndex];
-                                    (point as HTMLDivElement).style.left =
-                                        `${dataPoint.element.x - 4}px`;
-                                    (point as HTMLDivElement).style.top =
-                                        `${dataPoint.element.y - 4}px`;
-                                    ++pointIndex;
-                                }
-                                const tooltip: HTMLDivElement =
-                                    container.querySelector(".tooltip");
-                                const tooltipWidth = 185 + 6 * 2;
-                                const tooltipHeight =
-                                    6 * 3 +
-                                    14 *
-                                        (context.tooltip.dataPoints.length + 1);
-                                tooltip.style.width = `${tooltipWidth}px`;
-                                tooltip.style.height = `${tooltipHeight}px`;
-                                const middle =
-                                    (context.chart.chartArea.left +
-                                        context.chart.chartArea.right) /
-                                    2;
-                                const leftOverflow = Math.max(
-                                    tooltipWidth - (x - 6),
-                                    0,
-                                );
-                                const rightOverflow = Math.max(
-                                    x +
-                                        6 +
-                                        tooltipWidth -
-                                        context.chart.chartArea.right,
-                                    0,
-                                );
-                                let leftSide: boolean;
-                                if (x < middle) {
-                                    if (rightOverflow === 0) {
-                                        leftSide = false;
-                                    } else {
-                                        leftSide = leftOverflow < rightOverflow;
-                                    }
-                                } else {
-                                    if (leftOverflow === 0) {
-                                        leftSide = true;
-                                    } else {
-                                        leftSide = leftOverflow < rightOverflow;
-                                    }
-                                }
-                                if (leftSide) {
-                                    if (leftOverflow === 0) {
-                                        tooltip.style.left = `${x - 6 - tooltipWidth}px`;
-                                    } else {
-                                        tooltip.style.left = "0";
-                                    }
-                                } else {
-                                    if (rightOverflow === 0) {
-                                        tooltip.style.left = `${x + 6}px`;
-                                    } else {
-                                        tooltip.style.left = `${context.chart.chartArea.right - tooltipWidth}px`;
-                                    }
-                                }
-                                tooltip.style.top = `${(context.chart.chartArea.bottom + context.chart.chartArea.top - tooltipHeight) / 2}px`;
-                                const title: HTMLDivElement =
-                                    container.querySelector(".title");
-                                title.innerText =
-                                    collection.extendedLabels[
-                                        context.tooltip.dataPoints[0].dataIndex
-                                    ];
-                                pointIndex = 0;
-                                for (const value of container.querySelectorAll(
-                                    ".value",
-                                )) {
-                                    const y: number =
-                                        context.tooltip.dataPoints[pointIndex]
-                                            .raw["y"];
-                                    if (y === 0) {
-                                        (value as HTMLDivElement).innerText =
-                                            "0";
-                                    } else {
-                                        const digits = Math.max(
-                                            3 - Math.floor(Math.log10(y)),
-                                            0,
-                                        );
-                                        (value as HTMLDivElement).innerText =
-                                            y.toLocaleString("en", {
-                                                minimumFractionDigits: digits,
-                                                maximumFractionDigits: digits,
-                                            });
-                                    }
-                                    ++pointIndex;
-                                }
-                                container.style.opacity = "1";
+
+                            const x = dataPoints[0].element.x;
+                            const line: HTMLDivElement =
+                                container.querySelector(".line");
+                            line.style.top = `${context.chart.chartArea.top}px`;
+                            line.style.height = `${context.chart.chartArea.bottom - context.chart.chartArea.top}px`;
+                            line.style.left = `${x - 0.5}px`;
+                            const points: HTMLDivElement =
+                                container.querySelector(".points");
+                            let pointIndex = 0;
+                            for (const point of points.children) {
+                                const dataPoint = dataPoints[pointIndex];
+                                (point as HTMLDivElement).style.left =
+                                    `${dataPoint.element.x - 4}px`;
+                                (point as HTMLDivElement).style.top =
+                                    `${dataPoint.element.y - 4}px`;
+                                ++pointIndex;
                             }
+                            const tooltip: HTMLDivElement =
+                                container.querySelector(".tooltip");
+                            const tooltipWidth = 185 + 6 * 2;
+                            const tooltipHeight =
+                                6 * 3 + 14 * (dataPoints.length + 1);
+                            tooltip.style.width = `${tooltipWidth}px`;
+                            tooltip.style.height = `${tooltipHeight}px`;
+                            const middle =
+                                (context.chart.chartArea.left +
+                                    context.chart.chartArea.right) /
+                                2;
+                            const leftOverflow = Math.max(
+                                tooltipWidth - (x - 6),
+                                0,
+                            );
+                            const rightOverflow = Math.max(
+                                x +
+                                    6 +
+                                    tooltipWidth -
+                                    context.chart.chartArea.right,
+                                0,
+                            );
+                            let leftSide: boolean;
+                            if (x < middle) {
+                                if (rightOverflow === 0) {
+                                    leftSide = false;
+                                } else {
+                                    leftSide = leftOverflow < rightOverflow;
+                                }
+                            } else {
+                                if (leftOverflow === 0) {
+                                    leftSide = true;
+                                } else {
+                                    leftSide = leftOverflow < rightOverflow;
+                                }
+                            }
+                            if (leftSide) {
+                                if (leftOverflow === 0) {
+                                    tooltip.style.left = `${x - 6 - tooltipWidth}px`;
+                                } else {
+                                    tooltip.style.left = "0";
+                                }
+                            } else {
+                                if (rightOverflow === 0) {
+                                    tooltip.style.left = `${x + 6}px`;
+                                } else {
+                                    tooltip.style.left = `${context.chart.chartArea.right - tooltipWidth}px`;
+                                }
+                            }
+                            tooltip.style.top = `${(context.chart.chartArea.bottom + context.chart.chartArea.top - tooltipHeight) / 2}px`;
+                            const title: HTMLDivElement =
+                                container.querySelector(".title");
+                            title.innerText =
+                                collection.extendedLabels[
+                                    dataPoints[0].dataIndex
+                                ];
+                            pointIndex = 0;
+                            for (const value of container.querySelectorAll(
+                                ".value",
+                            )) {
+                                const y: number =
+                                    dataPoints[pointIndex].raw["y"];
+                                if (y === 0) {
+                                    (value as HTMLDivElement).innerText = "0";
+                                } else {
+                                    const digits = Math.max(
+                                        3 - Math.floor(Math.log10(y)),
+                                        0,
+                                    );
+                                    (value as HTMLDivElement).innerText =
+                                        y.toLocaleString("en", {
+                                            minimumFractionDigits: digits,
+                                            maximumFractionDigits: digits,
+                                        });
+                                }
+                                ++pointIndex;
+                            }
+                            container.style.opacity = "1";
                         },
                     },
                 },
@@ -520,8 +576,7 @@ class SamplePainter {
             chartIndex < this.chartsProperties.length;
             ++chartIndex
         ) {
-            const expected =
-                this.chartsProperties[chartIndex].curvesNamesAndColors.length;
+            const expected = this.chartsProperties[chartIndex].curves.length;
             const got = chartToCurvesToValue[chartIndex].length;
             if (expected !== got) {
                 throw new Error(
