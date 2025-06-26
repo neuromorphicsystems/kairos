@@ -32,3 +32,4 @@ tokio = {version = "1.44.2", features = [
 ]}
 toml = {version = "0.8.23", features = ["display"]}
 wtransport = "0.6.1"
+zip = {version = "4.2.0", default-features = false, features = ["chrono", "deflate"]}

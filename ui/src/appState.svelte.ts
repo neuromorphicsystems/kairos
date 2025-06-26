@@ -182,9 +182,14 @@ export interface Recording {
     state: RecordingState;
 }
 
+interface SharedRecordingsState {
+    data_directory: string;
+    recordings: Recording[];
+}
+
 interface AppState {
     shared: SharedState;
-    recordings: Recording[];
+    sharedRecordings: SharedRecordingsState;
     local: LocalState;
     deviceIdToRecordState: { [key: number]: RecordState };
 }
@@ -196,7 +201,10 @@ const appState: AppState = $state({
         devices: [],
         errors: [],
     },
-    recordings: [],
+    sharedRecordings: {
+        data_directory: "",
+        recordings: [],
+    },
     local: {
         connectionStatus: "connecting",
         layout: "h",

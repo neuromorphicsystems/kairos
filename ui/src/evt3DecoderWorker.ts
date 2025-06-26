@@ -5,11 +5,7 @@ import * as utilities from "./utilities";
 import extension_binary from "../extension/build/extension_bg.wasm";
 import init, * as extension from "../extension/build/extension";
 
-console.log(`${utilities.utcString()} | decoder created`); // @DEV
-
 (async () => {
-    console.log(`${utilities.utcString()} | decoder async created`); // @DEV
-
     const module = await init({ module_or_path: extension_binary.buffer });
     const renderer = new extension.Renderer(1280, 720, 1 << 22);
     const ts_and_ons_pointer_byte_length =

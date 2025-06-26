@@ -147,8 +147,8 @@ transportWorker.addEventListener("message", ({ data }) => {
                     }
                     break;
                 }
-                case "Recordings": {
-                    appState.recordings = message.content;
+                case "SharedRecordingsState": {
+                    appState.sharedRecordings = message.content;
                     break;
                 }
                 default: {
@@ -271,11 +271,6 @@ function startStream(
 ): [Decoder, Painter] {
     const sourceId = deviceIdAndStreamIndexToSourceId(deviceId, streamIndex);
     let stream = null;
-
-    console.log(
-        `${utilities.utcString()} | startStream(${deviceId}, ${streamIndex}), sourceId=${sourceId}`,
-    ); // @DEV
-
     for (const device of appState.shared.devices) {
         if (device.id === deviceId) {
             if (streamIndex >= device.streams.length) {
@@ -345,10 +340,6 @@ function startStream(
         });
         return [decoder, painter];
     } else if (stream.type === "Evk4Samples") {
-        console.log(
-            `${utilities.utcString()} | create new evk4 samples stream`,
-        ); // @DEV
-
         const painter = new SamplePainter([
             {
                 name: "Event rate",
@@ -555,8 +546,6 @@ export function updateConfiguration(
 }
 
 export function updateLookback(deviceId: number, lookback: Lookback) {
-    console.log(); // @DEV
-
     sendMessageToServer({
         type: "UpdateLookback",
         device_id: deviceId,
@@ -577,6 +566,19 @@ export function updateAutotrigger(deviceId: number, autotrigger: Autotrigger) {
         type: "UpdateAutotrigger",
         device_id: deviceId,
         autotrigger,
+    });
+}
+
+export function convert(names: string[]) {
+    sendMessageToServer({
+        type: "Convert",
+        names,
+    });
+}
+
+export function cancelConvert() {
+    sendMessageToServer({
+        type: "CancelConvert",
     });
 }
 

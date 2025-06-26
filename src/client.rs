@@ -44,13 +44,6 @@ fn spawn_stream(
     only_send_if_different: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        println!(
-            "{} | started stream {} task (session id {})",
-            now_utc_string(),
-            stream_id.0,
-            incoming_session_id,
-        ); // @DEV
-
         let mut last_sent_packet: Option<Vec<u8>> = None;
         loop {
             match packet_receiver.recv().await {
@@ -77,41 +70,16 @@ fn spawn_stream(
                     };
                     stack.lock().expect("stack mutex is poisoned").push(packet);
                     if result.is_err() {
-                        println!(
-                            "{} | unidirectional_stream write error: {:?} (session id {})",
-                            now_utc_string(),
-                            result,
-                            incoming_session_id,
-                        ); // @DEV
                         break;
                     }
                 }
                 None => {
-                    println!(
-                        "{} | packet_receiver.recv() returned None (session id {})",
-                        now_utc_string(),
-                        incoming_session_id,
-                    ); // @DEV
                     break;
                 }
             }
         }
-        println!(
-            "{} | camera task will exit (session id {})",
-            now_utc_string(),
-            incoming_session_id
-        ); // @DEV
         {
             let mut router_guard = router.write().expect("router mutex is poisoned");
-
-            println!(
-                "{} | [in stream handler] remove client_id = {} from router {:?} (session id {})",
-                now_utc_string(),
-                client_id.0,
-                router_guard,
-                incoming_session_id,
-            ); // @DEV
-
             if let Some(clients_ids_and_senders) = router_guard.get_mut(&stream_id) {
                 let mut removed = 0;
                 for index in 0..clients_ids_and_senders.len() {
@@ -137,14 +105,6 @@ fn spawn_stream(
             } else {
                 println!("client {} not found in router during cleanup", client_id.0);
             }
-
-            println!(
-                "{} | removed client_id = {} from router {:?} (session id {})",
-                now_utc_string(),
-                client_id.0,
-                router_guard,
-                incoming_session_id,
-            ); // @DEV
         }
         loop {
             match packet_receiver.recv().await {
@@ -181,12 +141,6 @@ async fn handle_client_message(
         }
         protocol::ClientMessage::StartStream { stream_id } => {
             let stream_id = device::StreamId(stream_id);
-            println!(
-                "{} | start stream {} (session id {})",
-                now_utc_string(),
-                stream_id.0,
-                incoming_session_id
-            ); // @DEV
             let mut unidirectional_stream = connection.open_uni().await?.await?;
             unidirectional_stream
                 .write_all(&protocol::stream_description(
@@ -214,21 +168,7 @@ async fn handle_client_message(
                     {
                         false
                     } else {
-                        println!(
-                            "{} | add sender for client_id = {} (session id {})",
-                            now_utc_string(),
-                            client_id.0,
-                            incoming_session_id,
-                        ); // @DEV
                         clients_ids_and_senders.push((client_id, packet_sender));
-
-                        println!(
-                            "{} | added sender for client_id = {} to router {:?} (session id {})",
-                            now_utc_string(),
-                            client_id.0,
-                            router_guard,
-                            incoming_session_id,
-                        ); // @DEV
                         true
                     }
                 } else {
@@ -434,6 +374,57 @@ async fn handle_client_message(
             }
             Ok(())
         }
+        protocol::ClientMessage::Convert { mut names } => {
+            let mut context_guard = context.lock().await;
+            names.sort();
+            let mut name_index = 0;
+            let mut recording_index = 0;
+            while name_index < names.len()
+                && recording_index < context_guard.shared_recordings_state.recordings.len()
+            {
+                match names[name_index]
+                    .cmp(&context_guard.shared_recordings_state.recordings[recording_index].name)
+                {
+                    std::cmp::Ordering::Less => {
+                        name_index += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if let protocol::RecordingState::Complete { size_bytes, zip } =
+                            context_guard.shared_recordings_state.recordings[recording_index].state
+                        {
+                            if !zip {
+                                context_guard.shared_recordings_state.recordings[recording_index]
+                                    .state = protocol::RecordingState::Queued { size_bytes, zip };
+                            }
+                        }
+                        name_index += 1;
+                        recording_index += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        recording_index += 1;
+                    }
+                }
+            }
+            context_guard.notify_convert.notify_one();
+            Ok(())
+        }
+        protocol::ClientMessage::CancelConvert => {
+            let mut context_guard = context.lock().await;
+            let mut changed = false;
+            for recording in context_guard.shared_recordings_state.recordings.iter_mut() {
+                if let protocol::RecordingState::Queued { size_bytes, zip } = recording.state {
+                    recording.state = protocol::RecordingState::Complete { size_bytes, zip };
+                    changed = true;
+                }
+            }
+            if changed {
+                if let Err(error) = context_guard.broadcast_shared_recordings_state() {
+                    println!("broadcast_recordings error: {error:?}");
+                }
+            }
+            context_guard.notify_convert_cancel.notify_one();
+            Ok(())
+        }
     }
 }
 
@@ -476,7 +467,10 @@ pub async fn manage_connection(
             (
                 protocol::ServerMessage::SharedClientState(&context_guard.shared_client_state)
                     .to_bytes()?,
-                protocol::ServerMessage::Recordings(&context_guard.recordings).to_bytes()?,
+                protocol::ServerMessage::SharedRecordingsState(
+                    &context_guard.shared_recordings_state,
+                )
+                .to_bytes()?,
                 context_guard.router.clone(),
                 context_guard.packet_stack.clone(),
                 context_guard.sample_stack.clone(),
@@ -526,13 +520,6 @@ pub async fn manage_connection(
         true,
     ));
     'client: loop {
-        println!(
-            "{} | client loop (client id {}, session id {})",
-            now_utc_string(),
-            client_id.0,
-            incoming_session_id,
-        ); // @DEV
-
         tokio::select! {
             client_message_result = message_bidirectional_stream.1.read(&mut message_buffer[message_offset..]) => {
                 match client_message_result {
@@ -584,7 +571,6 @@ pub async fn manage_connection(
                         }
                     }
                     Err(error) => {
-                        println!("{} | error from message reader {:?} (session id {})", now_utc_string(), error, incoming_session_id); // @DEV
                         result = Err(error.into());
                         break 'client;
                     }
@@ -596,24 +582,10 @@ pub async fn manage_connection(
                         .0
                         .write_all(&shared_client_state_bytes)
                         .await {
-                            println!(
-                                "{} | message_bidirectional_stream write_all error (client id {}, session id {})",
-                                now_utc_string(),
-                                client_id.0,
-                                incoming_session_id,
-                            ); // @DEV
-
                             result = Err(error.into());
                             break 'client;
                         }
                 } else {
-                    println!(
-                        "{} | shared_client_state_receiver closed (client id {}, session id {})",
-                        now_utc_string(),
-                        client_id.0,
-                        incoming_session_id,
-                    ); // @DEV
-
                     result = Err(anyhow!("shared_client_state_receiver closed"));
                     break 'client;
                 }
@@ -622,15 +594,6 @@ pub async fn manage_connection(
     }
     {
         let mut router_guard = router.write().expect("router mutex is poisoned");
-
-        println!(
-            "{} | [in client handler] remove client_id = {} from router {:?} (session id {})",
-            now_utc_string(),
-            client_id.0,
-            router_guard,
-            incoming_session_id,
-        ); // @DEV
-
         for (_, clients_ids_and_senders) in router_guard.iter_mut() {
             let mut removed = 0;
             for index in 0..clients_ids_and_senders.len() {
@@ -644,14 +607,6 @@ pub async fn manage_connection(
                 let _ = clients_ids_and_senders.pop();
             }
         }
-
-        println!(
-            "{} | removed client_id = {} from router {:?} (session id {})",
-            now_utc_string(),
-            client_id.0,
-            router_guard,
-            incoming_session_id,
-        ); // @DEV
     }
     for stream_handle in stream_handles {
         if let Err(error) = stream_handle.await {

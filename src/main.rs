@@ -92,12 +92,14 @@ struct Context {
     next_client_id: client::ClientId,
     id_to_client: std::collections::HashMap<client::ClientId, client::ClientProxy>,
     shared_client_state: protocol::SharedClientState,
-    recordings: Vec<protocol::Recording>,
+    shared_recordings_state: protocol::SharedRecordingsState,
     id_to_device: std::collections::HashMap<device::DeviceId, device::DeviceProxy>,
     router: std::sync::Arc<std::sync::RwLock<Router>>,
     packet_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
     sample_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
     record_state_stack: std::sync::Arc<std::sync::Mutex<stack::Stack>>,
+    notify_convert: std::sync::Arc<tokio::sync::Notify>,
+    notify_convert_cancel: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl Context {
@@ -112,9 +114,9 @@ impl Context {
         Ok(())
     }
 
-    fn broadcast_recordings(&mut self) -> Result<(), anyhow::Error> {
-        let bytes =
-            protocol::ServerMessage::Recordings(&self.recordings).to_bytes()?;
+    fn broadcast_shared_recordings_state(&mut self) -> Result<(), anyhow::Error> {
+        let bytes = protocol::ServerMessage::SharedRecordingsState(&self.shared_recordings_state)
+            .to_bytes()?;
         // we use a list of 'mpsc' channels instead of a single 'broadcast' channel
         // to avoid stalls
         for (_, client) in self.id_to_client.iter_mut() {
@@ -168,7 +170,11 @@ impl Context {
             .collect();
         std::mem::swap(&mut self.shared_client_state.devices, &mut devices);
         if let Err(error) = self.broadcast_shared_client_state() {
-            println!("broadcast_shared_client_state error: {error:?}");
+            println!(
+                "{} | broadcast_shared_client_state error: {:?}",
+                now_utc_string(),
+                error
+            );
         }
     }
 }
@@ -185,7 +191,45 @@ async fn main() -> Result<(), anyhow::Error> {
     let tcp_listener =
         tokio::net::TcpListener::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), args.http_port))
             .await?;
-    let (recordings, recordings_errors) = recordings::initialize(&args.data_directory);
+
+    let mut errors = Vec::new();
+    if let Err(error) = recordings::process_write_files(
+        &args
+            .data_directory
+            .join(recordings::RECORDINGS_DIRECTORY_NAME),
+        recordings::Action::Rename,
+    ) {
+        errors.push(format!(
+            "Renaming partial recordings from {} raised an error: {}",
+            args.data_directory.to_string_lossy(),
+            error
+        ));
+    }
+    if let Err(error) = recordings::process_write_files(
+        &args
+            .data_directory
+            .join(recordings::CONVERTED_RECORDINGS_DIRECTORY_NAME),
+        recordings::Action::Delete,
+    ) {
+        errors.push(format!(
+            "Deleting partially converted recordings from {} raised an error: {}",
+            args.data_directory.to_string_lossy(),
+            error
+        ));
+    }
+    let mut recordings = Vec::new();
+    recordings::read_recordings(&args.data_directory, &mut recordings, |error| {
+        errors.push(format!(
+            "Reading recordings from {} raised an error: {}",
+            args.data_directory.to_string_lossy(),
+            error
+        ));
+    });
+
+    let notify_convert = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify_convert_cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify_recordings_changed = std::sync::Arc::new(tokio::sync::Notify::new());
+
     let context = std::sync::Arc::new(tokio::sync::Mutex::new(Context {
         time_reference,
         host_to_endpoint: std::collections::HashMap::new(),
@@ -197,18 +241,12 @@ async fn main() -> Result<(), anyhow::Error> {
             data_directory: args.data_directory.to_string_lossy().to_string(),
             disk_available_and_total_space: None,
             devices: Vec::new(),
-            errors: recordings_errors
-                .into_iter()
-                .map(|error| {
-                    format!(
-                        "Loading past recordings from {} raised an error: {}",
-                        args.data_directory.to_string_lossy(),
-                        error
-                    )
-                })
-                .collect(),
+            errors,
         },
-        recordings,
+        shared_recordings_state: protocol::SharedRecordingsState {
+            data_directory: args.data_directory.to_string_lossy().to_string(),
+            recordings,
+        },
         id_to_device: std::collections::HashMap::new(),
         router: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::from([(
             device::StreamId(constants::RECORD_STATE_STREAM_ID),
@@ -229,6 +267,8 @@ async fn main() -> Result<(), anyhow::Error> {
             constants::STACK_MINIMUM_TIME_WINDOW,
             constants::STACK_MINIMUM_SAMPLES,
         ))),
+        notify_convert: notify_convert.clone(),
+        notify_convert_cancel: notify_convert_cancel.clone(),
     }));
 
     {
@@ -262,11 +302,6 @@ async fn main() -> Result<(), anyhow::Error> {
                                 if let Ok(device) =
                                     listed_device.open(None, None, event_loop, flag.clone())
                                 {
-                                    println!(
-                                        "{} | new device, id {}",
-                                        now_utc_string(),
-                                        next_device_id
-                                    ); // @DEV
                                     devices_and_proxies.push(device::create_device_and_proxies(
                                         device::DeviceId(next_device_id),
                                         listed_device,
@@ -421,10 +456,257 @@ async fn main() -> Result<(), anyhow::Error> {
                         .shared_client_state
                         .disk_available_and_total_space = disk_available_and_total_space;
                     if let Err(error) = context_guard.broadcast_shared_client_state() {
-                        println!("broadcast_shared_client_state error: {error:?}");
+                        println!(
+                            "{} | broadcast_shared_client_state error: {:?}",
+                            now_utc_string(),
+                            error
+                        );
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // periodically check the disk for recordings changes
+    {
+        let context = context.clone();
+        let notify_recordings_changed = notify_recordings_changed.clone();
+        tokio::spawn(async move {
+            let mut recordings = Vec::new();
+            let mut errors = Vec::new();
+            loop {
+                let force_send = tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                        false
+                    },
+                    _ = notify_recordings_changed.notified() => {
+                        true
+                    },
+                };
+                recordings.clear();
+                errors.clear();
+                let data_directory = context
+                    .lock()
+                    .await
+                    .shared_client_state
+                    .data_directory
+                    .clone();
+                recordings::read_recordings(
+                    &data_directory.clone().into(),
+                    &mut recordings,
+                    |error| {
+                        errors.push(format!(
+                            "Reading recordings from {} raised an error: {}",
+                            args.data_directory.to_string_lossy(),
+                            error
+                        ));
+                    },
+                );
+                {
+                    let mut context_guard = context.lock().await;
+                    if context_guard.shared_recordings_state.data_directory == data_directory {
+                        let mut new_recording_index = 0;
+                        let mut recording_index = 0;
+                        while new_recording_index < recordings.len()
+                            && recording_index
+                                < context_guard.shared_recordings_state.recordings.len()
+                        {
+                            match recordings[new_recording_index].name.cmp(
+                                &context_guard.shared_recordings_state.recordings[recording_index]
+                                    .name,
+                            ) {
+                                std::cmp::Ordering::Less => {
+                                    new_recording_index += 1;
+                                }
+                                std::cmp::Ordering::Equal => {
+                                    if let protocol::RecordingState::Complete { size_bytes, zip } =
+                                        recordings[new_recording_index].state
+                                    {
+                                        match context_guard.shared_recordings_state.recordings
+                                            [recording_index]
+                                            .state
+                                        {
+                                            protocol::RecordingState::Queued { .. } => {
+                                                recordings[new_recording_index].state =
+                                                    protocol::RecordingState::Queued {
+                                                        size_bytes,
+                                                        zip,
+                                                    };
+                                            }
+                                            protocol::RecordingState::Converting { .. } => {
+                                                recordings[new_recording_index].state =
+                                                    protocol::RecordingState::Converting {
+                                                        size_bytes,
+                                                        zip,
+                                                    };
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    new_recording_index += 1;
+                                    recording_index += 1;
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    recording_index += 1;
+                                }
+                            }
+                        }
+                        let send = if recordings != context_guard.shared_recordings_state.recordings
+                        {
+                            std::mem::swap(
+                                &mut context_guard.shared_recordings_state.recordings,
+                                &mut recordings,
+                            );
+                            true
+                        } else {
+                            force_send
+                        };
+                        if send {
+                            if let Err(error) = context_guard.broadcast_shared_recordings_state() {
+                                println!(
+                                    "{} | broadcast_shared_recordings_state error: {:?}",
+                                    now_utc_string(),
+                                    error
+                                );
+                            }
+                        }
+                    } else {
+                        std::mem::swap(
+                            &mut context_guard.shared_recordings_state.recordings,
+                            &mut recordings,
+                        );
+                        context_guard.shared_recordings_state.data_directory = data_directory;
+                        if let Err(error) = context_guard.broadcast_shared_recordings_state() {
+                            println!(
+                                "{} | broadcast_shared_recordings_state error: {:?}",
+                                now_utc_string(),
+                                error
+                            );
+                        }
+                    }
+                    if errors.len() > 0 {
+                        context_guard
+                            .shared_client_state
+                            .errors
+                            .extend_from_slice(&errors);
+                        if let Err(error) = context_guard.broadcast_shared_client_state() {
+                            println!(
+                                "{} | broadcast_shared_client_state error: {:?}",
+                                now_utc_string(),
+                                error
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // convert files when requested
+    {
+        let context = context.clone();
+        tokio::spawn(async move {
+            let mut has_work = false;
+            loop {
+                if has_work {
+                    let data_directory_and_name: Option<(String, String)> = {
+                        let mut name: Option<String> = None;
+                        let mut context_guard = context.lock().await;
+                        let mut changed = false;
+                        for recording in context_guard.shared_recordings_state.recordings.iter_mut()
+                        {
+                            if let protocol::RecordingState::Queued { size_bytes, zip } =
+                                recording.state
+                            {
+                                changed = true;
+                                if zip {
+                                    recording.state =
+                                        protocol::RecordingState::Complete { size_bytes, zip };
+                                } else {
+                                    recording.state =
+                                        protocol::RecordingState::Converting { size_bytes, zip };
+                                    name = Some(recording.name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        if changed {
+                            if let Err(error) = context_guard.broadcast_shared_recordings_state() {
+                                println!(
+                                    "{} | broadcast_shared_recordings_state error: {:?}",
+                                    now_utc_string(),
+                                    error
+                                );
+                            }
+                        }
+                        name.map(|name| {
+                            (
+                                context_guard.shared_recordings_state.data_directory.clone(),
+                                name,
+                            )
+                        })
+                    };
+                    if let Some((data_directory, name)) = data_directory_and_name {
+                        let cancelled =
+                            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let mut join_handle = {
+                            let data_directory = data_directory.clone();
+                            let name = name.clone();
+                            let cancelled = cancelled.clone();
+                            tokio::task::spawn_blocking(move || {
+                                recordings::convert(&data_directory.into(), &name, cancelled)
+                            })
+                        };
+                        loop {
+                            tokio::select! {
+                                _ = notify_convert_cancel.notified() => {
+                                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                                }
+                                result = &mut join_handle => {
+                                    let mut context_guard = context.lock().await;
+                                    if data_directory == context_guard.shared_recordings_state.data_directory {
+                                        for recording in context_guard.shared_recordings_state.recordings.iter_mut() {
+                                            if let protocol::RecordingState::Converting { size_bytes, zip } =
+                                                recording.state
+                                            {
+                                                recording.state = protocol::RecordingState::Complete { size_bytes, zip };
+                                            }
+                                        }
+                                    }
+                                    match result {
+                                        Ok(result) => {
+                                            if let Err(error) = result {
+                                                context_guard.shared_client_state.errors.push(
+                                                    format!(
+                                                        "Converting \"{}\" in \"{}\" failed: {}",
+                                                        name,
+                                                        data_directory,
+                                                        error
+                                                    )
+                                                );
+                                            }
+                                        },
+                                        Err(error) => {
+                                            println!("{} | join_handle error: {:?}", now_utc_string(), error);
+                                        },
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        notify_recordings_changed.notify_one();
+                    } else {
+                        has_work = false;
+                    }
+                } else {
+                    tokio::select! {
+                        _ = notify_convert.notified() => {
+                            has_work = true;
+                        }
+                        _ = notify_convert_cancel.notified() => {}
+                    }
+                }
             }
         });
     }
@@ -565,7 +847,7 @@ async fn handle_http_request(
         "/" => hyper::Response::builder()
             .header(hyper::header::CONTENT_TYPE, "text/html")
             .body(http_body_util::Full::new(hyper::body::Bytes::from(
-                include_bytes!("../ui/build/index.html").as_slice(), // @DEV: feature flag to enable / disable embedding index.html
+                include_bytes!("../ui/build/index.html").as_slice(),
             )))?,
         _ => hyper::Response::builder()
             .status(hyper::StatusCode::NOT_FOUND)
@@ -593,7 +875,6 @@ async fn handle_transport_server(
             }
         }
     }
-    println!("destroy transport"); // @DEV
     drop(transport_server);
     terminated.notify_one();
 }
@@ -622,7 +903,7 @@ async fn handle_transport_session(
 ) -> Result<(), anyhow::Error> {
     let session_request = incoming_session.await?;
     println!(
-        "{} | new session (session id {}): authority {}, path {}",
+        "{} | New session (session id {}): authority {}, path {}",
         now_utc_string(),
         incoming_session_id,
         session_request.authority(),
@@ -645,14 +926,6 @@ async fn handle_transport_session(
         incoming_session_id,
     )
     .await;
-
-    println!(
-        "{} | manage_connection (session id {}) returned {:?}",
-        now_utc_string(),
-        incoming_session_id,
-        result
-    ); // @DEV
-
     {
         let mut context_guard = context.lock().await;
         let _ = context_guard.id_to_client.remove(&client_id);

@@ -421,17 +421,10 @@ class EventPainter {
             newContext(canvas, timestampOverlay, properties),
             canvasId,
         ]);
-
-        console.log(
-            `${utilities.utcString()} | attached ${canvasId}, props=${JSON.stringify(properties)}`,
-        ); // @DEV
-
         return canvasId;
     }
 
     detach(canvasId: number) {
-        console.log(`${utilities.utcString()} | detach ${canvasId}`); // @DEV
-
         for (let index = 0; index < this.contextsAndIds.length; ++index) {
             if (canvasId === this.contextsAndIds[index][1]) {
                 this.contextsAndIds.splice(index, 1);

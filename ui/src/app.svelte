@@ -55,6 +55,7 @@
         --button-background: #484848;
         --button-background-hover: #525252;
         --button-background-active: #5c5c5c;
+        --button-background-disabled: #404040;
         --border: #555555;
         --blue-0: #72a0c7;
         --blue-1: #4f88b9;

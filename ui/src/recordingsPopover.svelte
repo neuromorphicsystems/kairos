@@ -3,6 +3,7 @@
     import appState from "./appState.svelte";
     import Button from "./button.svelte";
     import PopoverMask from "./popoverMask.svelte";
+    import { convert, cancelConvert } from "./protocol.svelte";
     import * as utilities from "./utilities";
 
     let {
@@ -17,14 +18,19 @@
 
     let nameToSelected: { [key: string]: boolean } = $state(
         Object.fromEntries(
-            appState.recordings.map(recording => [recording.name, true]),
+            appState.sharedRecordings.recordings.map(recording => [
+                recording.name,
+                true,
+            ]),
         ),
     );
     let selectedCount: number = $state(
-        appState.recordings.filter(recording => selectable(recording)).length,
+        appState.sharedRecordings.recordings.filter(recording =>
+            selectable(recording),
+        ).length,
     );
     const converting = $derived(
-        appState.recordings.some(
+        appState.sharedRecordings.recordings.some(
             recording =>
                 recording.state.type === "Queued" ||
                 recording.state.type === "Converting",
@@ -32,7 +38,7 @@
     );
     $effect(() => {
         let count = 0;
-        for (let recording of appState.recordings) {
+        for (const recording of appState.sharedRecordings.recordings) {
             if (nameToSelected[recording.name] == null) {
                 nameToSelected[recording.name] = true;
             }
@@ -44,11 +50,7 @@
     });
 
     function selectable(recording: Recording): boolean {
-        return (
-            (recording.state.type === "Complete" ||
-                recording.state.type === "Converting") &&
-            !recording.state.zip
-        );
+        return recording.state.type === "Complete" && !recording.state.zip;
     }
 </script>
 
@@ -58,7 +60,7 @@
     <div class="property">
         <div class="name">Data directory</div>
         <div class="value">
-            {appState.shared.data_directory}
+            {appState.sharedRecordings.data_directory}
         </div>
     </div>
     <div class="buttons">
@@ -83,13 +85,28 @@
                 <Button
                     disabled={selectedCount === 0}
                     label="Convert selected"
-                    onClick={() => {}}
+                    onClick={() => {
+                        convert(
+                            appState.sharedRecordings.recordings
+                                .filter(
+                                    recording =>
+                                        selectable(recording) &&
+                                        nameToSelected[recording.name],
+                                )
+                                .map(recording => recording.name),
+                        );
+                    }}
                 ></Button>
             {/if}
         </div>
         <div class="right">
             {#if converting}
-                <Button label="Cancel conversion" onClick={() => {}}></Button>
+                <Button
+                    label="Cancel conversion"
+                    onClick={() => {
+                        cancelConvert();
+                    }}
+                ></Button>
             {/if}
         </div>
     </div>
@@ -111,7 +128,7 @@
                 </tr>
             </thead>
             <tbody>
-                {#each appState.recordings as recording}
+                {#each appState.sharedRecordings.recordings as recording}
                     <tr
                         class={selectable(recording) ? "selectable" : ""}
                         onclick={() => {

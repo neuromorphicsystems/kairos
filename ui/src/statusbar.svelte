@@ -166,24 +166,24 @@
     .status-bar.connecting {
         background-color: color-mix(
             in oklab,
-            var(--background-3) 30%,
-            var(--yellow-1) 70%
+            var(--background-3) 50%,
+            var(--yellow-1) 50%
         );
     }
 
     .status-bar.disconnected {
         background-color: color-mix(
             in oklab,
-            var(--background-3) 30%,
-            var(--red-1) 70%
+            var(--background-3) 50%,
+            var(--red-1) 50%
         );
     }
 
     .status-bar.connected.recording {
         background-color: color-mix(
             in oklab,
-            var(--background-3) 30%,
-            var(--blue-1) 70%
+            var(--background-3) 50%,
+            var(--blue-1) 50%
         );
     }
 
@@ -202,6 +202,12 @@
         display: flex;
         align-items: center;
         gap: 8px;
+    }
+
+    .status-bar.connected.recording .menu,
+    .status-bar.disconnected .menu,
+    .status-bar.connecting .menu {
+        border-left: 1px solid var(--content-0);
     }
 
     .center {
@@ -237,16 +243,88 @@
         cursor: pointer;
     }
 
-    button:hover {
-        background-color: var(--button-background-hover);
-    }
-
     button.active {
         background-color: var(--button-background);
     }
 
+    button:hover,
     button.active:hover {
         background-color: var(--button-background-hover);
+    }
+
+    .status-bar.connecting button {
+        background-color: color-mix(
+            in oklab,
+            var(--background-3) 50%,
+            var(--yellow-1) 50%
+        );
+    }
+
+    .status-bar.connecting button.active {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background) 40%,
+            var(--yellow-1) 60%
+        );
+    }
+
+    .status-bar.connecting button:hover,
+    .status-bar.connecting button.active:hover {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background-hover) 30%,
+            var(--yellow-1) 70%
+        );
+    }
+
+    .status-bar.disconnected button {
+        background-color: color-mix(
+            in oklab,
+            var(--background-3) 50%,
+            var(--red-1) 50%
+        );
+    }
+
+    .status-bar.disconnected button.active {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background) 40%,
+            var(--red-1) 60%
+        );
+    }
+
+    .status-bar.disconnected button:hover,
+    .status-bar.disconnected button.active:hover {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background-hover) 30%,
+            var(--red-1) 70%
+        );
+    }
+
+    .status-bar.connected.recording button {
+        background-color: color-mix(
+            in oklab,
+            var(--background-3) 50%,
+            var(--blue-1) 50%
+        );
+    }
+
+    .status-bar.connected.recording button.active {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background) 40%,
+            var(--blue-1) 60%
+        );
+    }
+
+    .status-bar.connected.recording button:hover,
+    .status-bar.connected.recording button.active:hover {
+        background-color: color-mix(
+            in oklab,
+            var(--button-background-hover) 30%,
+            var(--blue-1) 70%
+        );
     }
 
     .icon {

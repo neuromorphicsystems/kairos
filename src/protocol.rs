@@ -82,7 +82,7 @@ pub struct SharedClientState {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum RecordingState {
     Ongoing,
@@ -92,17 +92,23 @@ pub enum RecordingState {
     Converting { size_bytes: u64, zip: bool },
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Recording {
     pub name: String,
     pub state: RecordingState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SharedRecordingsState {
+    pub data_directory: String,
+    pub recordings: Vec<Recording>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type", content = "content")]
 pub enum ServerMessage<'a> {
     SharedClientState(&'a SharedClientState),
-    Recordings(&'a Vec<Recording>),
+    SharedRecordingsState(&'a SharedRecordingsState),
 }
 
 impl<'a> ServerMessage<'a> {
@@ -166,4 +172,8 @@ pub enum ClientMessage {
     StopRecording {
         device_id: u32,
     },
+    Convert {
+        names: Vec<String>,
+    },
+    CancelConvert,
 }

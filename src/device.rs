@@ -1,6 +1,7 @@
 use crate::constants;
 use crate::device;
 use crate::protocol;
+use crate::recordings;
 
 use neuromorphic_drivers::UsbDevice;
 use std::io::Write;
@@ -19,10 +20,6 @@ impl StreamId {
         let mut bytes = [stream_index, 0, 0, 0];
         bytes[1..4].copy_from_slice(&(device_id.0 & 0xFFFFFF).to_le_bytes()[0..3]);
         Self(u32::from_le_bytes(bytes))
-    }
-
-    pub fn device_id(self) -> u32 {
-        (self.0 & 0xFFFFFF00) >> 8
     }
 
     pub fn stream_index(self) -> u8 {
@@ -46,7 +43,7 @@ pub struct RecordConfiguration {
 }
 
 #[derive(Default, Clone)]
-struct LookbackBufferState {
+struct LookbackState {
     maximum_duration_us: u64,
     duration_us: u64,
     size_bytes: usize,
@@ -57,7 +54,7 @@ struct FileState {
     directory: std::path::PathBuf,
     name: String,
     duration_us: u64,
-    size_bytes: usize,
+    size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -100,7 +97,7 @@ struct EventThreadState {
     off_event_rate: f32,
     rising_trigger_count: u32,
     falling_trigger_count: u32,
-    lookback_buffer_state: Option<LookbackBufferState>,
+    lookback_state: Option<LookbackState>,
     file_state: Option<FileState>,
     autotrigger_state: Option<AutotriggerState>,
 }
@@ -148,49 +145,54 @@ pub struct DeviceProxy {
     pub configuration_changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[derive(Debug)]
-struct Davis346Sample {
+pub struct Index<'a> {
     system_time: u64,
     system_timestamp: u64,
-    on_event_rate: f32,
-    off_event_rate: f32,
-    autotrigger_state: AutotriggerState,
+    first_after_overflow: bool,
+    raw_file_offset: u64,
+    raw_length: u64,
+    state: &'a neuromorphic_drivers::adapters::State,
 }
 
-#[derive(Debug)]
-struct Evk3HdSample {
-    system_time: u64,
-    system_timestamp: u64,
-    on_event_rate: f32,
-    off_event_rate: f32,
-    autotrigger_state: AutotriggerState,
+impl<'a> Index<'a> {
+    fn write_to(
+        &self,
+        index_file: &mut std::io::BufWriter<std::fs::File>,
+    ) -> (u64, std::io::Result<()>) {
+        match self.state {
+            neuromorphic_drivers::adapters::State::Davis346(state) => todo!(),
+            neuromorphic_drivers::adapters::State::Evt3(state) => {
+                let mut data = [0u8; 54];
+                data[0..8].copy_from_slice(&self.system_time.to_le_bytes()); // 8
+                data[8..16].copy_from_slice(&self.system_timestamp.to_le_bytes()); // 8
+                data[16] = self.first_after_overflow as u8; // 1
+                data[17..25].copy_from_slice(&self.raw_file_offset.to_le_bytes()); // 8
+                data[25..33].copy_from_slice(&self.raw_length.to_le_bytes()); // 8
+                data[33..41].copy_from_slice(&state.t.to_le_bytes()); // 8
+                data[41..45].copy_from_slice(&state.overflows.to_le_bytes()); // 4
+                data[45..47].copy_from_slice(&state.previous_msb_t.to_le_bytes()); // 2
+                data[47..49].copy_from_slice(&state.previous_lsb_t.to_le_bytes()); // 2
+                data[49..51].copy_from_slice(&state.x.to_le_bytes()); // 2
+                data[51..53].copy_from_slice(&state.y.to_le_bytes()); // 2
+                data[53] = state.polarity as u8; // 1
+                write_all_count(index_file, &data)
+            }
+        }
+    }
 }
 
-#[derive(Debug)]
-struct Evk4Sample {
-    system_time: u64,
-    system_timestamp: u64,
-    on_event_rate: f32,
-    off_event_rate: f32,
-    rising_trigger_count: u32,
-    falling_trigger_count: u32,
-    illuminance: f32,
-    temperature: f32,
-    autotrigger_state: AutotriggerState,
-}
-
-// @DEV needed for the index file
-fn serialize_state(state: &neuromorphic_drivers::adapters::State) {}
-
-struct LookbackBufferItem {
+struct LookbackItem {
     datetime: chrono::DateTime<chrono::Local>,
+    system_time: u64,
+    system_timestamp: u64,
+    first_after_overflow: bool,
     configuration: std::rc::Rc<neuromorphic_drivers::Configuration>,
     state: neuromorphic_drivers::adapters::State,
     end_t: u64,
     raw: Vec<u8>,
 }
 
-struct LookbackBuffer {
+struct Lookback {
     maximum_packet_size_bytes: usize,
     maximum_duration_us: u64,
     maximum_size_bytes: usize,
@@ -198,25 +200,25 @@ struct LookbackBuffer {
     size_bytes: usize,
     read_index: usize,
     write_index: usize,
-    items: Vec<LookbackBufferItem>,
+    items: Vec<LookbackItem>,
     default_state: neuromorphic_drivers::adapters::State,
     current_configuration: std::rc::Rc<neuromorphic_drivers::Configuration>,
 }
 
-fn unwrap_non_empty_lookback(lookback_buffer: &Option<LookbackBuffer>) -> Option<&LookbackBuffer> {
-    match lookback_buffer {
-        Some(lookback_buffer) => {
-            if lookback_buffer.read_index == lookback_buffer.write_index {
+fn unwrap_non_empty_lookback(lookback: &Option<Lookback>) -> Option<&Lookback> {
+    match lookback {
+        Some(lookback) => {
+            if lookback.read_index == lookback.write_index {
                 None
             } else {
-                Some(lookback_buffer)
+                Some(lookback)
             }
         }
         None => None,
     }
 }
 
-impl LookbackBuffer {
+impl Lookback {
     fn new(
         maximum_duration_us: u64,
         maximum_size_bytes: usize,
@@ -228,8 +230,11 @@ impl LookbackBuffer {
         let items_length = maximum_size_bytes / maximum_packet_size_bytes;
         let mut items = Vec::with_capacity(items_length);
         for _ in 0..items_length {
-            items.push(LookbackBufferItem {
+            items.push(LookbackItem {
                 datetime: chrono::DateTime::default(),
+                system_time: 0,
+                system_timestamp: 0,
+                first_after_overflow: false,
                 configuration: current_configuration.clone(),
                 state: default_state,
                 end_t: 0,
@@ -271,56 +276,70 @@ impl LookbackBuffer {
     fn update_maximum_size_bytes(&mut self, new_maximum_size_bytes: usize) {
         self.maximum_size_bytes = new_maximum_size_bytes;
         let new_items_length = new_maximum_size_bytes / self.maximum_packet_size_bytes;
-        let mut new_items = Vec::with_capacity(new_items_length);
-        let count = (new_items_length - 1)
-            .min((self.write_index + self.items.len() - self.read_index) % self.items.len());
-        let mut index = (self.write_index + self.items.len() - count) % self.items.len();
-        self.size_bytes = 0;
-        while index != self.write_index {
-            let mut new_item = LookbackBufferItem {
-                datetime: self.items[index].datetime,
-                state: self.items[index].state,
-                end_t: self.items[index].end_t,
-                raw: Vec::new(),
-                configuration: self.items[index].configuration.clone(),
-            };
-            std::mem::swap(&mut self.items[index].raw, &mut new_item.raw);
-            self.size_bytes += new_item.raw.len();
-            new_items.push(new_item);
-            index = (index + 1) % self.items.len();
-        }
-        while new_items.len() < new_items_length {
-            new_items.push(LookbackBufferItem {
-                datetime: chrono::DateTime::default(),
-                configuration: self.current_configuration.clone(),
-                state: self.default_state,
-                end_t: 0,
-                raw: Vec::new(),
-            });
-        }
-        std::mem::swap(&mut self.items, &mut new_items);
-        self.read_index = 0;
-        self.write_index = count;
-        // no need to trim for duration because update_maximum_duration_us is
-        // always called first (when needed) during a configuration update
-        if self.read_index == self.write_index {
-            self.duration_us = 0;
-        } else {
-            self.duration_us =
-                self.items[(self.write_index + self.items.len() - 1) % self.items.len()].end_t
-                    - self.items[self.read_index].state.current_t();
+        if new_items_length != self.items.len() {
+            let mut new_items = Vec::with_capacity(new_items_length);
+            let count = (new_items_length - 1)
+                .min((self.write_index + self.items.len() - self.read_index) % self.items.len());
+            let mut index = (self.write_index + self.items.len() - count) % self.items.len();
+            self.size_bytes = 0;
+            while index != self.write_index {
+                let mut new_item = LookbackItem {
+                    datetime: self.items[index].datetime,
+                    system_time: self.items[index].system_time,
+                    system_timestamp: self.items[index].system_timestamp,
+                    first_after_overflow: self.items[index].first_after_overflow,
+                    state: self.items[index].state,
+                    end_t: self.items[index].end_t,
+                    raw: Vec::new(),
+                    configuration: self.items[index].configuration.clone(),
+                };
+                std::mem::swap(&mut self.items[index].raw, &mut new_item.raw);
+                self.size_bytes += new_item.raw.len();
+                new_items.push(new_item);
+                index = (index + 1) % self.items.len();
+            }
+            while new_items.len() < new_items_length {
+                new_items.push(LookbackItem {
+                    datetime: chrono::DateTime::default(),
+                    system_time: 0,
+                    system_timestamp: 0,
+                    first_after_overflow: false,
+                    configuration: self.current_configuration.clone(),
+                    state: self.default_state,
+                    end_t: 0,
+                    raw: Vec::new(),
+                });
+            }
+            std::mem::swap(&mut self.items, &mut new_items);
+            self.read_index = 0;
+            self.write_index = count;
+            // no need to trim for duration because update_maximum_duration_us is
+            // always called first (when needed) during a configuration update
+            if self.read_index == self.write_index {
+                self.duration_us = 0;
+            } else {
+                self.duration_us =
+                    self.items[(self.write_index + self.items.len() - 1) % self.items.len()].end_t
+                        - self.items[self.read_index].state.current_t();
+            }
         }
     }
 
     fn push(
         &mut self,
         datetime: chrono::DateTime<chrono::Local>,
+        system_time: u64,
+        system_timestamp: u64,
+        first_after_overflow: bool,
         state: neuromorphic_drivers::adapters::State,
         end_t: u64,
         buffer: &[u8],
         current_configuration: Option<neuromorphic_drivers::Configuration>,
     ) {
         self.items[self.write_index].datetime = datetime;
+        self.items[self.write_index].system_time = system_time;
+        self.items[self.write_index].system_timestamp = system_timestamp;
+        self.items[self.write_index].first_after_overflow = first_after_overflow;
         self.items[self.write_index].state = state;
         self.items[self.write_index].end_t = end_t;
         self.items[self.write_index].raw.resize(buffer.len(), 0);
@@ -345,8 +364,8 @@ impl LookbackBuffer {
         self.duration_us = end_t - self.items[self.read_index].state.current_t();
     }
 
-    fn state(&self) -> LookbackBufferState {
-        LookbackBufferState {
+    fn state(&self) -> LookbackState {
+        LookbackState {
             maximum_duration_us: self.maximum_duration_us,
             duration_us: self.duration_us,
             size_bytes: self.size_bytes,
@@ -354,65 +373,192 @@ impl LookbackBuffer {
     }
 }
 
-#[derive(Debug)]
-enum Sample {
-    Davis346(Davis346Sample),
-    Evk3HdSample(Evk3HdSample),
-    Evk4Sample(Evk4Sample),
+struct Davis346UiSample {
+    system_time: u64,
+    system_timestamp: u64,
+    on_event_rate: f32,
+    off_event_rate: f32,
+    autotrigger_state: AutotriggerState,
 }
 
-impl Sample {
+struct Evk3HdUiSample {
+    system_time: u64,
+    system_timestamp: u64,
+    on_event_rate: f32,
+    off_event_rate: f32,
+    autotrigger_state: AutotriggerState,
+}
+
+struct Evk4UiSample {
+    system_time: u64,
+    system_timestamp: u64,
+    on_event_rate: f32,
+    off_event_rate: f32,
+    rising_trigger_count: u32,
+    falling_trigger_count: u32,
+    illuminance: f32,
+    temperature: f32,
+    autotrigger_state: AutotriggerState,
+}
+
+enum UiSample {
+    Davis346(Davis346UiSample),
+    Evk3Hd(Evk3HdUiSample),
+    Evk4(Evk4UiSample),
+}
+
+impl UiSample {
     fn byte_length(&self) -> usize {
         match self {
-            Sample::Davis346(_) => 24 + AutotriggerState::byte_length(),
-            Sample::Evk3HdSample(_) => 24 + AutotriggerState::byte_length(),
-            Sample::Evk4Sample(_) => 40 + AutotriggerState::byte_length(),
+            UiSample::Davis346(_) => todo!(),
+            UiSample::Evk3Hd(_) => todo!(),
+            UiSample::Evk4(_) => 40 + AutotriggerState::byte_length(),
         }
     }
 
     fn serialize_to(&self, buffer: &mut Vec<u8>) {
         match self {
-            Sample::Davis346(davis346_sample) => {
-                buffer.extend(&davis346_sample.system_time.to_le_bytes()); // 8
-                buffer.extend(&davis346_sample.system_timestamp.to_le_bytes()); // 8
-                buffer.extend(&davis346_sample.on_event_rate.to_le_bytes()); // 4
-                buffer.extend(&davis346_sample.off_event_rate.to_le_bytes()); // 4
-                davis346_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
+            UiSample::Davis346(davis346_ui_sample) => {
+                todo!()
             }
-            Sample::Evk3HdSample(evk3_hd_sample) => {
-                buffer.extend(&evk3_hd_sample.system_time.to_le_bytes()); // 8
-                buffer.extend(&evk3_hd_sample.system_timestamp.to_le_bytes()); // 8
-                buffer.extend(&evk3_hd_sample.on_event_rate.to_le_bytes()); // 4
-                buffer.extend(&evk3_hd_sample.off_event_rate.to_le_bytes()); // 4
-                evk3_hd_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
+            UiSample::Evk3Hd(evk3_hd_ui_sample) => {
+                todo!()
             }
-            Sample::Evk4Sample(evk4_sample) => {
-                buffer.extend(&evk4_sample.system_time.to_le_bytes()); // 8
-                buffer.extend(&evk4_sample.system_timestamp.to_le_bytes()); // 8
-                buffer.extend(&evk4_sample.on_event_rate.to_le_bytes()); // 4
-                buffer.extend(&evk4_sample.off_event_rate.to_le_bytes()); // 4
-                buffer.extend(&evk4_sample.rising_trigger_count.to_le_bytes()); // 4
-                buffer.extend(&evk4_sample.falling_trigger_count.to_le_bytes()); // 4
-                buffer.extend(&evk4_sample.illuminance.to_le_bytes()); // 4
-                buffer.extend(&evk4_sample.temperature.to_le_bytes()); // 4
-                evk4_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
+            UiSample::Evk4(evk4_ui_sample) => {
+                buffer.extend(&evk4_ui_sample.system_time.to_le_bytes()); // 8
+                buffer.extend(&evk4_ui_sample.system_timestamp.to_le_bytes()); // 8
+                buffer.extend(&evk4_ui_sample.on_event_rate.to_le_bytes()); // 4
+                buffer.extend(&evk4_ui_sample.off_event_rate.to_le_bytes()); // 4
+                buffer.extend(&evk4_ui_sample.rising_trigger_count.to_le_bytes()); // 4
+                buffer.extend(&evk4_ui_sample.falling_trigger_count.to_le_bytes()); // 4
+                buffer.extend(&evk4_ui_sample.illuminance.to_le_bytes()); // 4
+                buffer.extend(&evk4_ui_sample.temperature.to_le_bytes()); // 4
+                evk4_ui_sample.autotrigger_state.serialize_to(buffer); // AutotriggerState::byte_length()
             }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Davis346FileSample {}
+
+#[derive(Clone, Copy)]
+struct Evk3HdFileSample {}
+
+#[derive(Clone, Copy)]
+struct Evk4FileSample {
+    system_time: u64,
+    system_timestamp: u64,
+    illuminance: f32,
+    temperature: f32,
+}
+
+#[derive(Clone, Copy)]
+enum FileSample {
+    Davis346(Davis346FileSample),
+    Evk3Hd(Evk3HdFileSample),
+    Evk4(Evk4FileSample),
+}
+
+impl From<&UiSample> for FileSample {
+    fn from(ui_sample: &UiSample) -> Self {
+        match ui_sample {
+            UiSample::Davis346(_) => todo!(),
+            UiSample::Evk3Hd(_) => todo!(),
+            UiSample::Evk4(evk4_ui_sample) => Self::Evk4(Evk4FileSample {
+                system_time: evk4_ui_sample.system_time,
+                system_timestamp: evk4_ui_sample.system_timestamp,
+                illuminance: evk4_ui_sample.illuminance,
+                temperature: evk4_ui_sample.temperature,
+            }),
+        }
+    }
+}
+
+impl FileSample {
+    fn write_to(
+        &self,
+        samples_file: &mut std::io::BufWriter<std::fs::File>,
+    ) -> (u64, std::io::Result<()>) {
+        match self {
+            FileSample::Davis346(_) => todo!(),
+            FileSample::Evk3Hd(_) => todo!(),
+            FileSample::Evk4(evk4_file_sample) => {
+                let mut data = [0u8; 24];
+                data[0..8].copy_from_slice(&evk4_file_sample.system_time.to_le_bytes());
+                data[8..16].copy_from_slice(&evk4_file_sample.system_timestamp.to_le_bytes());
+                data[16..20].copy_from_slice(&evk4_file_sample.illuminance.to_le_bytes());
+                data[20..24].copy_from_slice(&evk4_file_sample.temperature.to_le_bytes());
+                write_all_count(samples_file, &data)
+            }
+        }
+    }
+}
+
+struct SamplerLookback {
+    maximum_duration_us: u64,
+    read_index: usize,
+    write_index: usize,
+    items: Vec<FileSample>,
+    default_sample: FileSample,
+}
+
+impl SamplerLookback {
+    fn new(maximum_duration_us: u64, default_sample: FileSample) -> Self {
+        let sampling_period_us = constants::SAMPLING_PERIOD.as_micros() as u64;
+        let items_length = 1 + ((maximum_duration_us - 1) / sampling_period_us) as usize; // ceil
+        Self {
+            maximum_duration_us,
+            read_index: 0,
+            write_index: 0,
+            items: vec![default_sample; items_length],
+            default_sample,
+        }
+    }
+
+    fn update_maximum_duration_us(&mut self, new_maximum_duration_us: u64) {
+        let sampling_period_us = constants::SAMPLING_PERIOD.as_micros() as u64;
+        self.maximum_duration_us = new_maximum_duration_us;
+        let new_items_length = 1 + ((self.maximum_duration_us - 1) / sampling_period_us) as usize; // ceil
+        if self.items.len() != new_items_length {
+            let mut new_items = Vec::with_capacity(new_items_length);
+            let count = (new_items_length - 1)
+                .min((self.write_index + self.items.len() - self.read_index) % self.items.len());
+            let mut index = (self.write_index + self.items.len() - count) % self.items.len();
+            while index != self.write_index {
+                new_items.push(self.items[index]);
+                index = (index + 1) % self.items.len();
+            }
+            while new_items.len() < new_items_length {
+                new_items.push(self.default_sample);
+            }
+            std::mem::swap(&mut self.items, &mut new_items);
+            self.read_index = 0;
+            self.write_index = count;
+        }
+    }
+
+    fn push(&mut self, sample: FileSample) {
+        self.items[self.write_index] = sample;
+        self.write_index = (self.write_index + 1) % self.items.len();
+        if self.write_index == self.read_index {
+            self.read_index = (self.read_index + 1) % self.items.len();
         }
     }
 }
 
 fn serialize_record_state_to(
     device_id: DeviceId,
-    lookback_buffer_state: &Option<LookbackBufferState>,
-    name_and_duration_us_and_size_bytes: &Option<(String, u64, usize)>,
+    lookback_state: &Option<LookbackState>,
+    name_and_duration_us_and_size_bytes: &Option<(String, u64, u64)>,
     buffer: &mut Vec<u8>,
 ) {
     buffer.extend_from_slice(&device_id.0.to_le_bytes()); // 4
-    match lookback_buffer_state {
-        Some(lookback_buffer_state) => {
+    match lookback_state {
+        Some(lookback_state) => {
             buffer.push(1); // 1
-            buffer.extend_from_slice(&lookback_buffer_state.duration_us.to_le_bytes()); // 8
-            buffer.extend_from_slice(&lookback_buffer_state.size_bytes.to_le_bytes());
+            buffer.extend_from_slice(&lookback_state.duration_us.to_le_bytes()); // 8
+            buffer.extend_from_slice(&lookback_state.size_bytes.to_le_bytes());
             // 8
         }
         None => {
@@ -441,13 +587,13 @@ struct Recording {
     name: String,
     raw_file: Option<std::io::BufWriter<std::fs::File>>,
     raw_file_error: bool,
-    raw_file_offset: usize,
+    raw_file_offset: u64,
     index_file: Option<std::io::BufWriter<std::fs::File>>,
     index_file_error: bool,
     metadata_file: Option<std::io::BufWriter<std::fs::File>>,
     metadata_file_error: bool,
     start_t: u64,
-    size_bytes: usize,
+    size_bytes: u64,
 }
 
 struct SamplerRecording {
@@ -455,13 +601,13 @@ struct SamplerRecording {
     name: String,
     samples_file: Option<std::io::BufWriter<std::fs::File>>,
     samples_file_error: bool,
-    size_bytes: usize,
+    size_bytes: u64,
 }
 
 fn write_all_count(
     file: &mut std::io::BufWriter<std::fs::File>,
     mut buffer: &[u8],
-) -> (usize, std::io::Result<()>) {
+) -> (u64, std::io::Result<()>) {
     let mut written = 0;
     while !buffer.is_empty() {
         match file.write(buffer) {
@@ -475,7 +621,7 @@ fn write_all_count(
                 );
             }
             Ok(length) => {
-                written += length;
+                written += length as u64;
                 buffer = &buffer[length..]
             }
             Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -485,18 +631,20 @@ fn write_all_count(
     (written, Ok(()))
 }
 
-fn raw_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
+fn index_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
     directory.join(format!(
-        "{}.raw.kai{}",
+        "{}{}{}",
         name,
+        recordings::INDEX_FILE_EXTENSION,
         if write { ".write" } else { "" }
     ))
 }
 
-fn index_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
+fn raw_file_path(directory: &std::path::PathBuf, name: &str, write: bool) -> std::path::PathBuf {
     directory.join(format!(
-        "{}.index.kai{}",
+        "{}{}{}",
         name,
+        recordings::RAW_FILE_EXTENSION,
         if write { ".write" } else { "" }
     ))
 }
@@ -507,8 +655,9 @@ fn metadata_file_path(
     write: bool,
 ) -> std::path::PathBuf {
     directory.join(format!(
-        "{}.toml{}",
+        "{}{}{}",
         name,
+        recordings::METADATA_FILE_EXTENSION,
         if write { ".write" } else { "" }
     ))
 }
@@ -519,8 +668,9 @@ fn samples_file_path(
     write: bool,
 ) -> std::path::PathBuf {
     directory.join(format!(
-        "{}.samples.kai{}",
+        "{}{}{}",
         name,
+        recordings::SAMPLES_FILE_EXTENSION,
         if write { ".write" } else { "" }
     ))
 }
@@ -622,44 +772,28 @@ impl Recording {
             &directory, &name, true,
         ))?);
         // 0 is the file version number (not a string terminator)
-        raw_file.write_all(b"KAIROS-RAW\0")?;
+        raw_file.write_all(format!("{}\0", recordings::RAW_FILE_SIGNATURE).as_bytes())?;
         match adapter {
             neuromorphic_drivers::adapters::Adapter::Davis346(adapter) => todo!(),
             neuromorphic_drivers::adapters::Adapter::Evt3(adapter) => {
                 // format id (0 is EVT3)
                 raw_file.write_all(b"\0")?;
-                raw_file.write_all(&(30_u32.to_le_bytes()))?;
-                raw_file.write_all(&(adapter.width().to_be_bytes()))?; // 2
-                raw_file.write_all(&(adapter.height().to_be_bytes()))?; // 2
-                match state {
-                    neuromorphic_drivers::adapters::State::Davis346(_) => {
-                        panic!("adapter and state mismatch")
-                    }
-                    neuromorphic_drivers::adapters::State::Evt3(state) => {
-                        raw_file.write_all(&(state.t.to_le_bytes()))?; // 8
-                        raw_file.write_all(&(state.overflows.to_le_bytes()))?; // 4
-                        raw_file.write_all(&(state.previous_msb_t.to_le_bytes()))?; // 4
-                        raw_file.write_all(&(state.previous_lsb_t.to_le_bytes()))?; // 4
-                        raw_file.write_all(&(state.x.to_le_bytes()))?; // 2
-                        raw_file.write_all(&(state.y.to_le_bytes()))?; // 2
-                        raw_file.write_all(&(state.polarity as u16).to_le_bytes())?;
-                        // 2
-                    }
-                };
+                raw_file.write_all(&(adapter.width().to_le_bytes()))?; // 2
+                raw_file.write_all(&(adapter.height().to_le_bytes()))?; // 2
             }
         }
-        let raw_file_offset = 42;
+        let raw_file_offset = recordings::RAW_FILE_SIGNATURE.len() as u64 + 6;
         size_bytes += raw_file_offset;
         let mut index_file = std::io::BufWriter::new(std::fs::File::create(index_file_path(
             &directory, &name, true,
         ))?);
         // 0 is the file version number (not a string terminator)
-        index_file.write_all(b"KAIROS-INDEX\0")?;
+        index_file.write_all(format!("{}\0", recordings::INDEX_FILE_SIGNATURE).as_bytes())?;
         match adapter {
             neuromorphic_drivers::adapters::Adapter::Davis346(_) => todo!(),
             neuromorphic_drivers::adapters::Adapter::Evt3(_) => {
                 // format id (0 is EVT3)
-                raw_file.write_all(b"\0")?;
+                index_file.write_all(b"\0")?;
             }
         }
         size_bytes += 14;
@@ -669,7 +803,7 @@ impl Recording {
         {
             let datetime_string = format!("timestamp = \"{}\"\n\n", crate::utc_string(datetime));
             metadata_file.write_all(datetime_string.as_bytes())?;
-            size_bytes += datetime_string.len();
+            size_bytes += datetime_string.len() as u64;
         }
         {
             let trigger_string = format!(
@@ -685,7 +819,7 @@ impl Recording {
                 },
             );
             metadata_file.write_all(trigger_string.as_bytes())?;
-            size_bytes += trigger_string.len();
+            size_bytes += trigger_string.len() as u64;
         }
         {
             let properties_string = format!(
@@ -693,17 +827,13 @@ impl Recording {
                 toml::to_string(&properties).expect("TOML serialization failed")
             );
             metadata_file.write_all(properties_string.as_bytes())?;
-            size_bytes += properties_string.len();
+            size_bytes += properties_string.len() as u64;
         }
         {
             let configuration_string = configuration_to_toml(configuration);
             metadata_file.write_all(configuration_string.as_bytes())?;
-            size_bytes += configuration_string.len();
+            size_bytes += configuration_string.len() as u64;
         }
-
-        // @DEV write properties
-        // @DEV write configuration
-        size_bytes += 0; // @DEV should be the number of bytes written to .toml.write
         Ok(Recording {
             directory,
             name,
@@ -765,7 +895,7 @@ impl Drop for Recording {
 }
 
 fn create_new_recording(
-    lookback_buffer: &Option<LookbackBuffer>,
+    lookback: &Option<Lookback>,
     now: &chrono::DateTime<chrono::Local>,
     name: &str,
     adapter: &neuromorphic_drivers::Adapter,
@@ -791,8 +921,8 @@ fn create_new_recording(
         }
         directory
     };
-    let datetime = match unwrap_non_empty_lookback(lookback_buffer) {
-        Some(lookback_buffer) => &lookback_buffer.items[lookback_buffer.read_index].datetime,
+    let datetime = match unwrap_non_empty_lookback(lookback) {
+        Some(lookback) => &lookback.items[lookback.read_index].datetime,
         None => now,
     };
     let timestamp = crate::utc_string_path_safe(datetime);
@@ -801,16 +931,16 @@ fn create_new_recording(
     } else {
         format!("{timestamp}_{name}")
     };
-    let new_recording = match unwrap_non_empty_lookback(&lookback_buffer) {
-        Some(lookback_buffer) => Recording::new(
+    let new_recording = match unwrap_non_empty_lookback(&lookback) {
+        Some(lookback) => Recording::new(
             directory.clone(),
             name.clone(),
             datetime,
             trigger,
             adapter,
-            &lookback_buffer.items[lookback_buffer.read_index].state,
+            &lookback.items[lookback.read_index].state,
             properties,
-            &lookback_buffer.items[lookback_buffer.read_index].configuration,
+            &lookback.items[lookback.read_index].configuration,
         ),
         None => Recording::new(
             directory.clone(),
@@ -837,44 +967,102 @@ fn create_new_recording(
                     &mut event_thread_state_guard.file_state,
                 );
             }
-            if let Some(lookback_buffer) = unwrap_non_empty_lookback(&lookback_buffer) {
+            if let Some(lookback) = unwrap_non_empty_lookback(&lookback) {
                 if let Some(raw_file) = new_recording.raw_file.as_mut() {
-                    let mut index = lookback_buffer.read_index;
-                    while index != lookback_buffer.write_index {
-                        let raw_file_offset = new_recording.raw_file_offset;
-                        let (count, result) =
-                            write_all_count(raw_file, &lookback_buffer.items[index].raw);
-                        new_recording.raw_file_offset += count;
-                        new_recording.size_bytes += count;
-                        if let Err(error) = result {
-                            if !new_recording.raw_file_error {
-                                new_recording.raw_file_error = true;
-                                context
-                                    .blocking_lock()
-                                    .shared_client_state
-                                    .errors
-                                    .push(format!(
-                                        "Writing to \"{}\" failed ({})",
-                                        raw_file_path(
-                                            &new_recording.directory,
-                                            &new_recording.name,
-                                            true
-                                        )
-                                        .to_string_lossy(),
-                                        error
-                                    ));
+                    if let Some(index_file) = new_recording.index_file.as_mut() {
+                        if let Some(metadata_file) = new_recording.metadata_file.as_mut() {
+                            let mut previous_configuration =
+                                lookback.items[lookback.read_index].configuration.clone();
+                            let mut index = lookback.read_index;
+                            while index != lookback.write_index {
+                                let raw_file_offset = new_recording.raw_file_offset;
+                                let (count, result) =
+                                    write_all_count(raw_file, &lookback.items[index].raw);
+                                new_recording.raw_file_offset += count;
+                                new_recording.size_bytes += count;
+                                if let Err(error) = result {
+                                    if !new_recording.raw_file_error {
+                                        new_recording.raw_file_error = true;
+                                        context.blocking_lock().shared_client_state.errors.push(
+                                            format!(
+                                                "Writing to \"{}\" failed ({})",
+                                                raw_file_path(
+                                                    &new_recording.directory,
+                                                    &new_recording.name,
+                                                    true
+                                                )
+                                                .to_string_lossy(),
+                                                error
+                                            ),
+                                        );
+                                    }
+                                }
+                                let (count, result) = Index {
+                                    system_time: lookback.items[index].system_time,
+                                    system_timestamp: lookback.items[index].system_timestamp,
+                                    first_after_overflow: lookback.items[index]
+                                        .first_after_overflow,
+                                    raw_file_offset,
+                                    raw_length: count,
+                                    state: &lookback.items[index].state,
+                                }
+                                .write_to(index_file);
+                                new_recording.size_bytes += count;
+                                if let Err(error) = result {
+                                    if !new_recording.index_file_error {
+                                        new_recording.index_file_error = true;
+                                        context.blocking_lock().shared_client_state.errors.push(
+                                            format!(
+                                                "Writing to \"{}\" failed ({})",
+                                                index_file_path(
+                                                    &new_recording.directory,
+                                                    &new_recording.name,
+                                                    true
+                                                )
+                                                .to_string_lossy(),
+                                                error
+                                            ),
+                                        );
+                                    }
+                                }
+                                if !std::rc::Rc::ptr_eq(
+                                    &previous_configuration,
+                                    &lookback.items[index].configuration,
+                                ) {
+                                    let configuration_string = configuration_update_to_toml(
+                                        &lookback.items[index].datetime,
+                                        &lookback.items[index].configuration,
+                                    );
+                                    let (count, result) = write_all_count(
+                                        metadata_file,
+                                        configuration_string.as_bytes(),
+                                    );
+                                    new_recording.size_bytes += count;
+                                    if let Err(error) = result {
+                                        if !new_recording.metadata_file_error {
+                                            new_recording.metadata_file_error = true;
+                                            context
+                                                .blocking_lock()
+                                                .shared_client_state
+                                                .errors
+                                                .push(format!(
+                                                    "Writing to \"{}\" failed ({})",
+                                                    metadata_file_path(
+                                                        &new_recording.directory,
+                                                        &new_recording.name,
+                                                        true
+                                                    )
+                                                    .to_string_lossy(),
+                                                    error
+                                                ));
+                                        }
+                                    }
+                                    previous_configuration =
+                                        lookback.items[index].configuration.clone();
+                                }
+                                index = (index + 1) % lookback.items.len();
                             }
                         }
-                        // @DEV write the following to the index file:
-                        // - raw_file_offset
-                        // - previous_state
-                        // - usb timings
-                        // - whether this is the first packet after a clutch
-
-                        // @DEV write the following to the metadata file
-                        // if the configuration is different from the current conf,
-                        // add it to the metadata file
-                        index = (index + 1) % lookback_buffer.items.len();
                     }
                 }
             }
@@ -907,7 +1095,7 @@ impl SamplerRecording {
             &directory, &name, true,
         ))?);
         // 0 is the file version number (not a string terminator)
-        samples_file.write_all(b"KAIROS-SAMPLES\0")?;
+        samples_file.write_all(format!("{}\0", recordings::SAMPLES_FILE_SIGNATURE).as_bytes())?;
         samples_file.write_all(&[format_type])?;
         size_bytes += 16;
         Ok(SamplerRecording {
@@ -993,7 +1181,7 @@ pub fn create_device_and_proxies(
         off_event_rate: 0.0,
         rising_trigger_count: 0,
         falling_trigger_count: 0,
-        lookback_buffer_state: None,
+        lookback_state: None,
         file_state: None,
         autotrigger_state: None,
     }));
@@ -1063,7 +1251,7 @@ impl Device {
         let mut on_event_rate = 0.0;
         let mut off_event_rate = 0.0;
 
-        let mut lookback_buffer: Option<LookbackBuffer> = None;
+        let mut lookback: Option<Lookback> = None;
         let mut autostop_reference_t: u64 = 0;
         let mut autotrigger_moving_window = AutotriggerMovingWindow::new();
 
@@ -1075,6 +1263,10 @@ impl Device {
                 let mut context_guard = context.blocking_lock();
                 let _ = context_guard.id_to_device.remove(&self.id);
                 context_guard.update_shared_client_state_devices();
+                context_guard
+                    .shared_client_state
+                    .errors
+                    .push(format!("Device error: {}", error));
                 break;
             }
 
@@ -1142,47 +1334,19 @@ impl Device {
                 }
             }
 
-            // start a new recording (manual trigger)
-            match record_action {
-                RecordAction::Continue => {}
-                RecordAction::Start(name) => {
-                    let _ = recording.take();
-                    if let Some(new_recording) = create_new_recording(
-                        &lookback_buffer,
-                        &now,
-                        &name,
-                        &adapter,
-                        &self.properties,
-                        &new_configuration,
-                        &self.inner,
-                        &self.event_thread_state,
-                        &context,
-                        &mut autostop_reference_t,
-                        Trigger::Manual(crate::utc_string(&now)),
-                    ) {
-                        recording.replace(new_recording);
-                    }
-                }
-                RecordAction::Stop => {
-                    let _ = recording.take();
-                }
-            }
-
-            // update the lookback buffer's configuration if it changed
+            // update the lookback configuration if it changed
             if new_lookback.enabled {
-                match lookback_buffer.as_mut() {
-                    Some(lookback_buffer) => {
-                        if lookback_buffer.maximum_duration_us != new_lookback.maximum_duration_us {
-                            lookback_buffer
-                                .update_maximum_duration_us(new_lookback.maximum_duration_us);
+                match lookback.as_mut() {
+                    Some(lookback) => {
+                        if lookback.maximum_duration_us != new_lookback.maximum_duration_us {
+                            lookback.update_maximum_duration_us(new_lookback.maximum_duration_us);
                         }
-                        if lookback_buffer.maximum_size_bytes != new_lookback.maximum_size_bytes {
-                            lookback_buffer
-                                .update_maximum_size_bytes(new_lookback.maximum_size_bytes);
+                        if lookback.maximum_size_bytes != new_lookback.maximum_size_bytes {
+                            lookback.update_maximum_size_bytes(new_lookback.maximum_size_bytes);
                         }
                     }
                     None => {
-                        lookback_buffer.replace(LookbackBuffer::new(
+                        let _ = lookback.replace(Lookback::new(
                                 new_lookback.maximum_duration_us,
                                 new_lookback.maximum_size_bytes,
                                 match self.inner.as_ref() {
@@ -1202,7 +1366,33 @@ impl Device {
                     }
                 }
             } else {
-                let _ = lookback_buffer.take();
+                let _ = lookback.take();
+            }
+
+            // start a new recording (manual trigger)
+            match record_action {
+                RecordAction::Continue => {}
+                RecordAction::Start(name) => {
+                    let _ = recording.take();
+                    if let Some(new_recording) = create_new_recording(
+                        &lookback,
+                        &now,
+                        &name,
+                        &adapter,
+                        &self.properties,
+                        &new_configuration,
+                        &self.inner,
+                        &self.event_thread_state,
+                        &context,
+                        &mut autostop_reference_t,
+                        Trigger::Manual(crate::utc_string(&now)),
+                    ) {
+                        let _ = recording.replace(new_recording);
+                    }
+                }
+                RecordAction::Stop => {
+                    let _ = recording.take();
+                }
             }
 
             // build 1/60s event packets and calculate event rates
@@ -1220,15 +1410,18 @@ impl Device {
                 let mut falling_trigger_count = 0;
                 let previous_state = adapter.state();
                 let mut autotrigger_state: Option<AutotriggerState> = None;
+                let mut buffer_view_offset = 0;
                 loop {
-                    let (events_lengths, position) =
-                        adapter.events_lengths_until(buffer_view.slice, data_buffer_end_t);
-                    data_buffer.extend(buffer_view.slice);
+                    let (events_lengths, position) = adapter.events_lengths_until(
+                        &buffer_view.slice[buffer_view_offset..],
+                        data_buffer_end_t,
+                    );
+                    data_buffer.extend(
+                        &buffer_view.slice[buffer_view_offset..buffer_view_offset + position],
+                    );
                     match events_lengths {
                         neuromorphic_drivers::adapters::EventsLengths::Davis346(events_lengths) => {
-                            data_buffer_on_event_count += events_lengths.on;
-                            data_buffer_off_event_count += events_lengths.off;
-                            rising_trigger_count += events_lengths.trigger as u32;
+                            todo!()
                         }
                         neuromorphic_drivers::adapters::EventsLengths::Evt3(events_lengths) => {
                             data_buffer_on_event_count += events_lengths.on;
@@ -1237,105 +1430,105 @@ impl Device {
                             falling_trigger_count += events_lengths.trigger_falling as u32;
                         }
                     }
-                    if position / 2 < buffer_view.slice.len() / 2 {
-                        // update the event rate (graph display)
-                        event_rate_on_samples[event_rate_index] =
-                            data_buffer_on_event_count as f64 * constants::PACKET_FREQUENCY;
-                        event_rate_off_samples[event_rate_index] =
-                            data_buffer_off_event_count as f64 * constants::PACKET_FREQUENCY;
-                        event_rate_index = (event_rate_index + 1) % constants::EVENT_RATE_SAMPLES;
-                        {
-                            on_event_rate = (event_rate_on_samples.iter().sum::<f64>()
-                                / constants::EVENT_RATE_SAMPLES as f64)
-                                as f32;
-                            off_event_rate = (event_rate_off_samples.iter().sum::<f64>()
-                                / constants::EVENT_RATE_SAMPLES as f64)
-                                as f32;
-                        }
+                    if (buffer_view_offset + position) / 2 >= buffer_view.slice.len() / 2 {
+                        break;
+                    }
+                    buffer_view_offset += position;
 
-                        // update the event rate (auto-trigger)
-                        autotrigger_moving_window.push(
-                            (data_buffer_on_event_count + data_buffer_off_event_count) as f64
-                                * constants::PACKET_FREQUENCY,
+                    // update the event rate (graph display)
+                    event_rate_on_samples[event_rate_index] =
+                        data_buffer_on_event_count as f64 * constants::PACKET_FREQUENCY;
+                    event_rate_off_samples[event_rate_index] =
+                        data_buffer_off_event_count as f64 * constants::PACKET_FREQUENCY;
+                    event_rate_index = (event_rate_index + 1) % constants::EVENT_RATE_SAMPLES;
+                    {
+                        on_event_rate = (event_rate_on_samples.iter().sum::<f64>()
+                            / constants::EVENT_RATE_SAMPLES as f64)
+                            as f32;
+                        off_event_rate = (event_rate_off_samples.iter().sum::<f64>()
+                            / constants::EVENT_RATE_SAMPLES as f64)
+                            as f32;
+                    }
+
+                    // update the event rate (auto-trigger)
+                    autotrigger_moving_window.push(
+                        (data_buffer_on_event_count + data_buffer_off_event_count) as f64
+                            * constants::PACKET_FREQUENCY,
+                    );
+                    {
+                        let short_value =
+                            autotrigger_moving_window.mean(autotrigger.short_sliding_window);
+                        let long_value =
+                            autotrigger_moving_window.mean(autotrigger.long_sliding_window);
+                        let ratio = if long_value == 0.0 {
+                            1.0
+                        } else {
+                            short_value / long_value
+                        };
+                        update_autotrigger_state(
+                            &mut autotrigger_state,
+                            AutotriggerState {
+                                short_value: short_value as f32,
+                                long_value: long_value as f32,
+                                ratio: ratio as f32,
+                                threshold: autotrigger.threshold,
+                            },
                         );
-                        {
-                            let short_value =
-                                autotrigger_moving_window.mean(autotrigger.short_sliding_window);
-                            let long_value =
-                                autotrigger_moving_window.mean(autotrigger.long_sliding_window);
-                            let ratio = if long_value == 0.0 {
-                                1.0
-                            } else {
-                                short_value / long_value
-                            };
-                            update_autotrigger_state(
-                                &mut autotrigger_state,
-                                AutotriggerState {
-                                    short_value: short_value as f32,
-                                    long_value: long_value as f32,
-                                    ratio: ratio as f32,
-                                    threshold: autotrigger.threshold,
-                                },
-                            );
-                        }
-                        data_buffer_on_event_count = 0;
-                        data_buffer_off_event_count = 0;
+                    }
+                    data_buffer_on_event_count = 0;
+                    data_buffer_off_event_count = 0;
 
-                        {
-                            let router_guard = router.read().expect("router mutex is poisoned");
-                            if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
-                                for (_, sender) in clients_ids_and_senders {
-                                    let buffer = {
-                                        stack.lock().expect("packet stack mutex is poisoned").pop()
-                                    };
-                                    if let Some(mut buffer) = buffer {
-                                        match data_buffer_start_state {
-                                            neuromorphic_drivers::adapters::State::Davis346(
-                                                state,
-                                            ) => todo!(),
-                                            neuromorphic_drivers::adapters::State::Evt3(state) => {
-                                                let data_length = data_buffer.len().min(
-                                                    constants::PACKET_MAXIMUM_LENGTH as usize - 50,
-                                                );
-                                                let total_length = data_length + 50;
-                                                buffer.clear();
-                                                buffer.reserve_exact(total_length);
-                                                buffer.extend(&(total_length as u32).to_le_bytes()); // 4
-                                                buffer.extend(&system_time.to_le_bytes()); // 8
-                                                buffer.extend(&system_timestamp.to_le_bytes()); // 8
-                                                buffer.extend(&state.t.to_le_bytes()); // 8
-                                                buffer.extend(&state.overflows.to_le_bytes()); // 4
-                                                buffer.extend(&state.previous_msb_t.to_le_bytes()); // 2
-                                                buffer.extend(&state.previous_lsb_t.to_le_bytes()); // 2
-                                                buffer.extend(&state.x.to_le_bytes()); // 2
-                                                buffer.extend(&state.y.to_le_bytes()); // 2
-                                                buffer
-                                                    .extend(&(state.polarity as u16).to_le_bytes()); // 2
-                                                buffer.extend(&data_buffer_end_t.to_le_bytes()); // 8
-                                                buffer.extend(&data_buffer[0..data_length]);
-                                                if let Ok(permit) = sender.try_reserve() {
-                                                    permit.send(buffer);
-                                                } else {
-                                                    stack
-                                                        .lock()
-                                                        .expect("packet stack mutex is poisoned")
-                                                        .push(buffer);
-                                                }
+                    // send data to the UI
+                    {
+                        let router_guard = router.read().expect("router mutex is poisoned");
+                        if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
+                            for (_, sender) in clients_ids_and_senders {
+                                let buffer =
+                                    { stack.lock().expect("packet stack mutex is poisoned").pop() };
+                                if let Some(mut buffer) = buffer {
+                                    match data_buffer_start_state {
+                                        neuromorphic_drivers::adapters::State::Davis346(state) => {
+                                            todo!()
+                                        }
+                                        neuromorphic_drivers::adapters::State::Evt3(state) => {
+                                            let data_length = data_buffer.len().min(
+                                                constants::PACKET_MAXIMUM_LENGTH as usize - 50,
+                                            );
+                                            let total_length = data_length + 50;
+                                            buffer.clear();
+                                            buffer.reserve_exact(total_length);
+                                            buffer.extend(&(total_length as u32).to_le_bytes()); // 4
+                                            buffer.extend(&system_time.to_le_bytes()); // 8
+                                            buffer.extend(&system_timestamp.to_le_bytes()); // 8
+                                            buffer.extend(&state.t.to_le_bytes()); // 8
+                                            buffer.extend(&state.overflows.to_le_bytes()); // 4
+                                            buffer.extend(&state.previous_msb_t.to_le_bytes()); // 2
+                                            buffer.extend(&state.previous_lsb_t.to_le_bytes()); // 2
+                                            buffer.extend(&state.x.to_le_bytes()); // 2
+                                            buffer.extend(&state.y.to_le_bytes()); // 2
+                                            buffer.extend(&(state.polarity as u16).to_le_bytes()); // 2
+                                            buffer.extend(&data_buffer_end_t.to_le_bytes()); // 8
+                                            buffer.extend(&data_buffer[0..data_length]);
+                                            if let Ok(permit) = sender.try_reserve() {
+                                                permit.send(buffer);
+                                            } else {
+                                                stack
+                                                    .lock()
+                                                    .expect("packet stack mutex is poisoned")
+                                                    .push(buffer);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        data_buffer.clear();
-                        data_buffer_start_state = adapter.state();
-                        next_packet_index += 1;
-                        data_buffer_end_t = (next_packet_index as f64 * 1e6
-                            / constants::PACKET_FREQUENCY)
-                            .round() as u64;
-                    } else {
-                        break;
                     }
+                    data_buffer.clear();
+                    data_buffer_start_state = adapter.state();
+                    next_packet_index += 1;
+                    data_buffer_end_t = (next_packet_index as f64 * 1e6
+                        / constants::PACKET_FREQUENCY)
+                        .round() as u64;
                 }
 
                 // start a new recording (auto-trigger)
@@ -1344,7 +1537,7 @@ impl Device {
                     {
                         if recording.is_none() {
                             if let Some(new_recording) = create_new_recording(
-                                &lookback_buffer,
+                                &lookback,
                                 &now,
                                 "",
                                 &adapter,
@@ -1361,7 +1554,7 @@ impl Device {
                                     threshold: autotrigger.threshold,
                                 }),
                             ) {
-                                recording.replace(new_recording);
+                                let _ = recording.replace(new_recording);
                             }
                         } else {
                             autostop_reference_t = previous_state.current_t();
@@ -1372,37 +1565,66 @@ impl Device {
                 // write raw event data to the recording
                 if let Some(recording) = recording.as_mut() {
                     if let Some(raw_file) = recording.raw_file.as_mut() {
-                        let raw_file_offset = recording.raw_file_offset;
-                        let (count, result) = write_all_count(raw_file, buffer_view.slice);
-                        recording.raw_file_offset += count;
-                        recording.size_bytes += count;
-                        if let Err(error) = result {
-                            if !recording.raw_file_error {
-                                recording.raw_file_error = true;
-                                context
-                                    .blocking_lock()
-                                    .shared_client_state
-                                    .errors
-                                    .push(format!(
-                                        "Writing to \"{}\" failed ({})",
-                                        raw_file_path(&recording.directory, &recording.name, true)
+                        if let Some(index_file) = recording.index_file.as_mut() {
+                            let raw_file_offset = recording.raw_file_offset;
+                            let (count, result) = write_all_count(raw_file, buffer_view.slice);
+                            recording.raw_file_offset += count;
+                            recording.size_bytes += count;
+                            if let Err(error) = result {
+                                if !recording.raw_file_error {
+                                    recording.raw_file_error = true;
+                                    context.blocking_lock().shared_client_state.errors.push(
+                                        format!(
+                                            "Writing to \"{}\" failed ({})",
+                                            raw_file_path(
+                                                &recording.directory,
+                                                &recording.name,
+                                                true
+                                            )
                                             .to_string_lossy(),
-                                        error
-                                    ));
+                                            error
+                                        ),
+                                    );
+                                }
+                            }
+                            let (count, result) = Index {
+                                system_time,
+                                system_timestamp,
+                                first_after_overflow: buffer_view.first_after_overflow,
+                                raw_file_offset,
+                                raw_length: count,
+                                state: &previous_state,
+                            }
+                            .write_to(index_file);
+                            recording.size_bytes += count;
+                            if let Err(error) = result {
+                                if !recording.index_file_error {
+                                    recording.index_file_error = true;
+                                    context.blocking_lock().shared_client_state.errors.push(
+                                        format!(
+                                            "Writing to \"{}\" failed ({})",
+                                            index_file_path(
+                                                &recording.directory,
+                                                &recording.name,
+                                                true
+                                            )
+                                            .to_string_lossy(),
+                                            error
+                                        ),
+                                    );
+                                }
                             }
                         }
-                        // @DEV write the following to the index file:
-                        // - raw_file_offset
-                        // - previous_state
-                        // - usb timings
-                        // - whether this is the first packet after a clutch
                     }
                 }
 
                 // push data to the lookback buffer
-                if let Some(lookback_buffer) = lookback_buffer.as_mut() {
-                    lookback_buffer.push(
+                if let Some(lookback) = lookback.as_mut() {
+                    lookback.push(
                         now,
+                        system_time,
+                        system_timestamp,
+                        buffer_view.first_after_overflow,
                         previous_state,
                         adapter.current_t(),
                         buffer_view.slice,
@@ -1423,9 +1645,8 @@ impl Device {
                         .event_thread_state
                         .lock()
                         .expect("event thread state mutex is poisoned");
-                    event_thread_state_guard.lookback_buffer_state = lookback_buffer
-                        .as_ref()
-                        .map(|lookback_buffer| lookback_buffer.state());
+                    event_thread_state_guard.lookback_state =
+                        lookback.as_ref().map(|lookback| lookback.state());
                     event_thread_state_guard.on_event_rate = on_event_rate;
                     event_thread_state_guard.off_event_rate = off_event_rate;
                     event_thread_state_guard.rising_trigger_count += rising_trigger_count;
@@ -1460,13 +1681,13 @@ impl Device {
 enum SamplerRecordingAction {
     Continue {
         duration_us: u64,
-        size_bytes: usize,
+        size_bytes: u64,
     },
     Start {
         directory: std::path::PathBuf,
         name: String,
         duration_us: u64,
-        size_bytes: usize,
+        size_bytes: u64,
     },
     Stop,
 }
@@ -1490,6 +1711,7 @@ impl DeviceSampler {
             ratio: 1.0,
             threshold: protocol::Autotrigger::default().threshold,
         };
+        let mut sampler_lookback: Option<SamplerLookback> = None;
         let mut next_sample = std::time::Instant::now();
         while self.running.load(std::sync::atomic::Ordering::Relaxed) {
             let now = std::time::Instant::now();
@@ -1501,31 +1723,21 @@ impl DeviceSampler {
                     next_sample += constants::SAMPLING_PERIOD;
                 }
             }
-            let mut sample = match self.inner.as_ref() {
+
+            // sample camera data
+            let mut ui_sample = match self.inner.as_ref() {
                 neuromorphic_drivers::Device::InivationDavis346(_) => {
-                    Sample::Davis346(Davis346Sample {
-                        system_time: 0,
-                        system_timestamp: 0,
-                        on_event_rate: 0.0,
-                        off_event_rate: 0.0,
-                        autotrigger_state: previous_autotrigger_state,
-                    })
+                    todo!()
                 }
                 neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
-                    Sample::Evk3HdSample(Evk3HdSample {
-                        system_time: 0,
-                        system_timestamp: 0,
-                        on_event_rate: 0.0,
-                        off_event_rate: 0.0,
-                        autotrigger_state: previous_autotrigger_state,
-                    })
+                    todo!()
                 }
                 neuromorphic_drivers::Device::PropheseeEvk4(device) => {
                     let illuminance = device.illuminance().unwrap_or(u32::MAX);
                     let temperature = device
                         .temperature_celsius()
                         .map_or(f32::NAN, |temperature_celsius| temperature_celsius.0);
-                    Sample::Evk4Sample(Evk4Sample {
+                    UiSample::Evk4(Evk4UiSample {
                         system_time: 0,
                         system_timestamp: 0,
                         on_event_rate: 0.0,
@@ -1540,7 +1752,9 @@ impl DeviceSampler {
                     })
                 }
             };
-            let (sampler_recording_action, lookback_buffer_state) = {
+
+            // receive data from the event thread
+            let (sampler_recording_action, lookback_state) = {
                 let mut event_thread_state_guard = self
                     .event_thread_state
                     .lock()
@@ -1552,44 +1766,26 @@ impl DeviceSampler {
                 let system_timestamp = std::time::Instant::now()
                     .duration_since(time_reference)
                     .as_micros() as u64;
-                match &mut sample {
-                    Sample::Davis346(davis346_sample) => {
-                        davis346_sample.system_time = system_time;
-                        davis346_sample.system_timestamp = system_timestamp;
-                        davis346_sample.on_event_rate = event_thread_state_guard.on_event_rate;
-                        davis346_sample.off_event_rate = event_thread_state_guard.off_event_rate;
-                        if let Some(autotrigger_state) =
-                            event_thread_state_guard.autotrigger_state.take()
-                        {
-                            davis346_sample.autotrigger_state = autotrigger_state;
-                            previous_autotrigger_state = autotrigger_state;
-                        }
+                match &mut ui_sample {
+                    UiSample::Davis346(davis346_ui_sample) => {
+                        todo!()
                     }
-                    Sample::Evk3HdSample(evk3_hd_sample) => {
-                        evk3_hd_sample.system_time = system_time;
-                        evk3_hd_sample.system_timestamp = system_timestamp;
-                        evk3_hd_sample.on_event_rate = event_thread_state_guard.on_event_rate;
-                        evk3_hd_sample.off_event_rate = event_thread_state_guard.off_event_rate;
-                        if let Some(autotrigger_state) =
-                            event_thread_state_guard.autotrigger_state.take()
-                        {
-                            evk3_hd_sample.autotrigger_state = autotrigger_state;
-                            previous_autotrigger_state = autotrigger_state;
-                        }
+                    UiSample::Evk3Hd(evk3_hd_ui_sample) => {
+                        todo!()
                     }
-                    Sample::Evk4Sample(evk4_sample) => {
-                        evk4_sample.system_time = system_time;
-                        evk4_sample.system_timestamp = system_timestamp;
-                        evk4_sample.on_event_rate = event_thread_state_guard.on_event_rate;
-                        evk4_sample.off_event_rate = event_thread_state_guard.off_event_rate;
-                        evk4_sample.rising_trigger_count =
+                    UiSample::Evk4(evk4_ui_sample) => {
+                        evk4_ui_sample.system_time = system_time;
+                        evk4_ui_sample.system_timestamp = system_timestamp;
+                        evk4_ui_sample.on_event_rate = event_thread_state_guard.on_event_rate;
+                        evk4_ui_sample.off_event_rate = event_thread_state_guard.off_event_rate;
+                        evk4_ui_sample.rising_trigger_count =
                             event_thread_state_guard.rising_trigger_count;
-                        evk4_sample.falling_trigger_count =
+                        evk4_ui_sample.falling_trigger_count =
                             event_thread_state_guard.falling_trigger_count;
                         if let Some(autotrigger_state) =
                             event_thread_state_guard.autotrigger_state.take()
                         {
-                            evk4_sample.autotrigger_state = autotrigger_state;
+                            evk4_ui_sample.autotrigger_state = autotrigger_state;
                             previous_autotrigger_state = autotrigger_state;
                         }
                     }
@@ -1626,27 +1822,45 @@ impl DeviceSampler {
                 };
                 (
                     sampler_recording_action,
-                    event_thread_state_guard.lookback_buffer_state.clone(),
+                    event_thread_state_guard.lookback_state.clone(),
                 )
             };
-            let name_and_duration_us_and_size_bytes: Option<(String, u64, usize)> =
+
+            // update the lookback configuration if needed
+            match lookback_state.as_ref() {
+                Some(lookback_state) => match sampler_lookback.as_mut() {
+                    Some(sampler_lookback) => {
+                        if sampler_lookback.maximum_duration_us
+                            != lookback_state.maximum_duration_us
+                        {
+                            sampler_lookback
+                                .update_maximum_duration_us(lookback_state.maximum_duration_us);
+                        }
+                    }
+                    None => {
+                        let _ = sampler_lookback.replace(SamplerLookback::new(
+                            lookback_state.maximum_duration_us,
+                            (&ui_sample).into(),
+                        ));
+                    }
+                },
+                None => {
+                    let _ = sampler_lookback.take();
+                }
+            }
+
+            // start a new recording (manual or auto trigger)
+            let mut name_and_duration_us_and_size_bytes: Option<(String, u64, u64)> =
                 match sampler_recording_action {
                     SamplerRecordingAction::Continue {
                         duration_us,
                         size_bytes,
-                    } => {
-                        match sampler_recording.as_mut() {
-                            Some(sampler_recording) => {
-                                // @DEV write sample to file
-                                Some((
-                                    sampler_recording.name.clone(),
-                                    duration_us,
-                                    size_bytes + sampler_recording.size_bytes,
-                                ))
-                            }
-                            None => unreachable!(),
+                    } => match sampler_recording.as_ref() {
+                        Some(sampler_recording) => {
+                            Some((sampler_recording.name.clone(), duration_us, size_bytes))
                         }
-                    }
+                        None => unreachable!(),
+                    },
                     SamplerRecordingAction::Start {
                         directory,
                         name,
@@ -1654,11 +1868,48 @@ impl DeviceSampler {
                         size_bytes,
                     } => {
                         let _ = sampler_recording.take();
+                        // 0 is Prophesee EVK4
                         match SamplerRecording::new(directory.clone(), name.clone(), 0) {
-                            Ok(new_sampler_recording) => {
-                                let size_bytes = size_bytes + new_sampler_recording.size_bytes;
-                                sampler_recording.replace(new_sampler_recording);
-                                // @DEV if we have a lookback, write it here
+                            Ok(mut new_sampler_recording) => {
+                                if let Some(samples_file) =
+                                    new_sampler_recording.samples_file.as_mut()
+                                {
+                                    if let Some(sampler_lookback) = sampler_lookback.as_ref() {
+                                        let mut index = sampler_lookback.read_index;
+                                        let mut lookback_count = 0;
+                                        let mut lookback_result = Ok(());
+                                        while index != sampler_lookback.write_index {
+                                            let (count, result) = sampler_lookback.items[index]
+                                                .write_to(samples_file);
+                                            lookback_count += count;
+                                            if lookback_result.is_ok() && result.is_err() {
+                                                lookback_result = result;
+                                            }
+                                            index = (index + 1) % sampler_lookback.items.len();
+                                        }
+                                        new_sampler_recording.size_bytes += lookback_count;
+                                        if let Err(error) = lookback_result {
+                                            if !new_sampler_recording.samples_file_error {
+                                                new_sampler_recording.samples_file_error = true;
+                                                context
+                                                    .blocking_lock()
+                                                    .shared_client_state
+                                                    .errors
+                                                    .push(format!(
+                                                        "Writing to \"{}\" failed ({})",
+                                                        samples_file_path(
+                                                            &new_sampler_recording.directory,
+                                                            &new_sampler_recording.name,
+                                                            true
+                                                        )
+                                                        .to_string_lossy(),
+                                                        error
+                                                    ));
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = sampler_recording.replace(new_sampler_recording);
                                 Some((name, duration_us, size_bytes))
                             }
                             Err(error) => {
@@ -1681,6 +1932,41 @@ impl DeviceSampler {
                         None
                     }
                 };
+
+            // write data to the recording
+            if let Some(sampler_recording) = sampler_recording.as_mut() {
+                if let Some(samples_file) = sampler_recording.samples_file.as_mut() {
+                    let file_sample: FileSample = (&ui_sample).into();
+                    let (count, result) = file_sample.write_to(samples_file);
+                    sampler_recording.size_bytes += count;
+                    if let Err(error) = result {
+                        if !sampler_recording.samples_file_error {
+                            sampler_recording.samples_file_error = true;
+                            context
+                                .blocking_lock()
+                                .shared_client_state
+                                .errors
+                                .push(format!(
+                                    "Writing to \"{}\" failed ({})",
+                                    samples_file_path(
+                                        &sampler_recording.directory,
+                                        &sampler_recording.name,
+                                        true
+                                    )
+                                    .to_string_lossy(),
+                                    error
+                                ));
+                        }
+                    }
+                    if let Some(name_and_duration_us_and_size_bytes) =
+                        name_and_duration_us_and_size_bytes.as_mut()
+                    {
+                        name_and_duration_us_and_size_bytes.2 += sampler_recording.size_bytes;
+                    }
+                }
+            }
+
+            // send data to the UI
             {
                 let router_guard = router.read().expect("router mutex is poisoned");
                 if let Some(clients_ids_and_senders) = router_guard.get(&stream_id) {
@@ -1692,11 +1978,11 @@ impl DeviceSampler {
                                 .pop()
                         };
                         if let Some(mut buffer) = buffer {
-                            let total_length = sample.byte_length() + 4;
+                            let total_length = ui_sample.byte_length() + 4;
                             buffer.clear();
                             buffer.reserve_exact(total_length);
                             buffer.extend(&(total_length as u32).to_le_bytes()); // 4
-                            sample.serialize_to(&mut buffer);
+                            ui_sample.serialize_to(&mut buffer);
                             if let Ok(permit) = sender.try_reserve() {
                                 permit.send(buffer);
                             } else {
@@ -1728,7 +2014,7 @@ impl DeviceSampler {
                             buffer.extend(&(total_length as u32).to_le_bytes()); // 4
                             serialize_record_state_to(
                                 self.id,
-                                &lookback_buffer_state,
+                                &lookback_state,
                                 &name_and_duration_us_and_size_bytes,
                                 &mut buffer,
                             );
@@ -1743,6 +2029,11 @@ impl DeviceSampler {
                         }
                     }
                 }
+            }
+
+            // push data to the lookback buffer
+            if let Some(sampler_lookback) = sampler_lookback.as_mut() {
+                sampler_lookback.push((&ui_sample).into());
             }
         }
         let _ = router

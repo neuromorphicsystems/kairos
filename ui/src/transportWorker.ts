@@ -64,8 +64,6 @@ class UnidirectionalStream {
         reader: ReadableStreamBYOBReader,
         onBuffer: (stream: UnidirectionalStream, buffer: ArrayBuffer) => void,
     ) {
-        console.log(`create stream with id ${streamId} (source ${sourceId})`); // @DEV
-
         this.streamId = streamId;
         this.sourceId = sourceId;
         this.buffers = new Array(bufferCount)
