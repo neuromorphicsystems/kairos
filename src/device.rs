@@ -161,6 +161,7 @@ impl<'a> Index<'a> {
     ) -> (u64, std::io::Result<()>) {
         match self.state {
             neuromorphic_drivers::adapters::State::Davis346(state) => todo!(),
+            neuromorphic_drivers::adapters::State::Dvxplorer(state) => todo!(),
             neuromorphic_drivers::adapters::State::Evt3(state) => {
                 let mut data = [0u8; 54];
                 data[0..8].copy_from_slice(&self.system_time.to_le_bytes()); // 8
@@ -749,7 +750,7 @@ macro_rules! register {
     }
 }
 
-register! { inivation_davis346, prophesee_evk3_hd, prophesee_evk4 }
+register! { inivation_davis346, inivation_dvxplorer, prophesee_evk3_hd, prophesee_evk4 }
 
 impl Recording {
     // An adapter's internal variables are split into "constants" and "variables" (state)
@@ -775,6 +776,7 @@ impl Recording {
         raw_file.write_all(format!("{}\0", recordings::RAW_FILE_SIGNATURE).as_bytes())?;
         match adapter {
             neuromorphic_drivers::adapters::Adapter::Davis346(adapter) => todo!(),
+            neuromorphic_drivers::adapters::Adapter::Dvxplorer(adapter) => todo!(),
             neuromorphic_drivers::adapters::Adapter::Evt3(adapter) => {
                 // format id (0 is EVT3)
                 raw_file.write_all(b"\0")?;
@@ -791,6 +793,7 @@ impl Recording {
         index_file.write_all(format!("{}\0", recordings::INDEX_FILE_SIGNATURE).as_bytes())?;
         match adapter {
             neuromorphic_drivers::adapters::Adapter::Davis346(_) => todo!(),
+            neuromorphic_drivers::adapters::Adapter::Dvxplorer(_) => todo!(),
             neuromorphic_drivers::adapters::Adapter::Evt3(_) => {
                 // format id (0 is EVT3)
                 index_file.write_all(b"\0")?;
@@ -1353,6 +1356,9 @@ impl Device {
                                     neuromorphic_drivers::Device::InivationDavis346(_) => {
                                         neuromorphic_drivers::inivation_davis346::DEFAULT_USB_CONFIGURATION.buffer_length
                                     },
+                                    neuromorphic_drivers::Device::InivationDvxplorer(_) => {
+                                        neuromorphic_drivers::inivation_davis346::DEFAULT_USB_CONFIGURATION.buffer_length
+                                    },
                                     neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
                                         neuromorphic_drivers::prophesee_evk3_hd::DEFAULT_USB_CONFIGURATION.buffer_length
                                     },
@@ -1423,6 +1429,11 @@ impl Device {
                         neuromorphic_drivers::adapters::EventsLengths::Davis346(events_lengths) => {
                             todo!()
                         }
+                        neuromorphic_drivers::adapters::EventsLengths::Dvxplorer(
+                            events_lengths,
+                        ) => {
+                            todo!()
+                        }
                         neuromorphic_drivers::adapters::EventsLengths::Evt3(events_lengths) => {
                             data_buffer_on_event_count += events_lengths.on;
                             data_buffer_off_event_count += events_lengths.off;
@@ -1488,6 +1499,9 @@ impl Device {
                                 if let Some(mut buffer) = buffer {
                                     match data_buffer_start_state {
                                         neuromorphic_drivers::adapters::State::Davis346(state) => {
+                                            todo!()
+                                        }
+                                        neuromorphic_drivers::adapters::State::Dvxplorer(state) => {
                                             todo!()
                                         }
                                         neuromorphic_drivers::adapters::State::Evt3(state) => {
@@ -1727,6 +1741,9 @@ impl DeviceSampler {
             // sample camera data
             let mut ui_sample = match self.inner.as_ref() {
                 neuromorphic_drivers::Device::InivationDavis346(_) => {
+                    todo!()
+                }
+                neuromorphic_drivers::Device::InivationDvxplorer(_) => {
                     todo!()
                 }
                 neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {

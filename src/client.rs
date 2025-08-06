@@ -222,6 +222,18 @@ async fn handle_client_message(
                             ),
                         }
                     }
+                    neuromorphic_drivers::Device::InivationDvxplorer(device) => match configuration
+                    {
+                        neuromorphic_drivers::Configuration::InivationDvxplorer(configuration) => {
+                            device.update_configuration(configuration);
+                            device_proxy
+                                .configuration_changed
+                                .store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        _ => {
+                            println!("mismatch between the configuration type and the device type")
+                        }
+                    },
                     neuromorphic_drivers::Device::PropheseeEvk3Hd(device) => match configuration {
                         neuromorphic_drivers::Configuration::PropheseeEvk3Hd(configuration) => {
                             device.update_configuration(configuration);

@@ -406,9 +406,9 @@ pub fn convert(
                                         index_data[51..53].try_into().expect("2 bytes"),
                                     ),
                                     polarity: if index_data[53] == 1 {
-                                        neuromorphic_drivers::types::DvsPolarity::On
+                                        neuromorphic_drivers::types::Polarity::On
                                     } else {
-                                        neuromorphic_drivers::types::DvsPolarity::Off
+                                        neuromorphic_drivers::types::Polarity::Off
                                     },
                                 };
                                 if raw_file_offset != raw_file_position {

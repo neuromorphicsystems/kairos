@@ -143,6 +143,7 @@ impl Context {
                     address: device.properties.address,
                     streams: match *device.inner {
                         neuromorphic_drivers::Device::InivationDavis346(_) => Vec::new(),
+                        neuromorphic_drivers::Device::InivationDvxplorer(_) => Vec::new(),
                         neuromorphic_drivers::Device::PropheseeEvk3Hd(_) => {
                             use neuromorphic_drivers::devices::prophesee_evk3_hd;
                             vec![protocol::Stream::Evt3 {

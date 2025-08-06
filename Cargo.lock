@@ -790,9 +790,9 @@ checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
 name = "libusb1-sys"
-version = "0.6.5"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17f6bace2f39082e9787c851afce469e7b2fe0f1cc64bbc68ca96653b63d8f17"
+checksum = "da050ade7ac4ff1ba5379af847a10a10a8e284181e060105bf8d86960ce9ce0f"
 dependencies = [
  "cc",
  "libc",
@@ -861,7 +861,9 @@ dependencies = [
 
 [[package]]
 name = "neuromorphic-drivers"
-version = "0.14.0"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f6baec3b0a28088d34bac86a1ae57db77747bcc4880ef24ea6c1b7e9840649e"
 dependencies = [
  "bincode",
  "libc",
@@ -875,9 +877,9 @@ dependencies = [
 
 [[package]]
 name = "neuromorphic-types"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9aa7a12e89a20c62414532ebd85b6466451fcad3d969414610efcca557c12bd5"
+checksum = "8ba7c9f18cdc800a16d47977472c5c75e96965eef57dbf39d37e937f390d6fef"
 
 [[package]]
 name = "nom"
@@ -1185,9 +1187,9 @@ dependencies = [
 
 [[package]]
 name = "rusb"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45fff149b6033f25e825cbb7b2c625a11ee8e6dac09264d49beb125e39aa97bf"
+checksum = "ab9f9ff05b63a786553a4c02943b74b34a988448671001e9a27e2f0565cc05a4"
 dependencies = [
  "libc",
  "libusb1-sys",
