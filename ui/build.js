@@ -13,7 +13,7 @@ await fs.promises.rm(path.join("extension", "build"), {
     force: true,
     recursive: true,
 });
-child_process.spawnSync(
+const cargoOutput = child_process.spawnSync(
     "cargo",
     ["build", "--target", "wasm32-unknown-unknown", "--release"],
     {
@@ -21,10 +21,13 @@ child_process.spawnSync(
         stdio: "inherit",
     },
 );
-child_process.spawnSync(
-    "wasm-bindgen",
+if (cargoOutput.error != null) {
+    throw cargoOutput.error;
+}
+const wasmOutput = child_process.spawnSync(
+    path.join("tools", "bin", "wasm-bindgen"),
     [
-        `target/wasm32-unknown-unknown/release/extension.wasm`,
+        path.join("target", "wasm32-unknown-unknown", "release", "extension.wasm"),
         "--out-dir",
         "build",
         "--target",
@@ -35,6 +38,9 @@ child_process.spawnSync(
         stdio: "inherit",
     },
 );
+if (wasmOutput.error != null) {
+    throw wasmOutput.error;
+}
 
 const wasmPlugin = {
     name: "wasm",
